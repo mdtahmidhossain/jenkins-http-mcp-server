@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jenkins-mcp-server"
+version = "0.1.0"
+description = "External Jenkins 2.563 MCP server using Jenkins HTTP APIs"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "Local" }]
+dependencies = [
+  "httpx>=0.28.1",
+  "mcp[cli]>=1.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "ruff>=0.14",
+]
+
+[project.scripts]
+jenkins-mcp-server = "jenkins_mcp_server.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jenkins_mcp_server"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+exclude = ["vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
