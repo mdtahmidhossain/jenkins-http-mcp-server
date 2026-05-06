@@ -89,6 +89,37 @@ def test_log_truncation() -> None:
     assert result == {"text": "abcde", "bytes_returned": 5, "truncated": True, "limit": 5}
 
 
+def test_stream_to_file_reports_progress(tmp_path) -> None:
+    progress: list[tuple[int, int | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"abcdef", headers={"Content-Length": "6"})
+
+    client = JenkinsClient(config(), transport=httpx.MockTransport(handler))
+    result = client.stream_to_file(
+        "job/demo/ws/**/*zip*/demo1.zip",
+        tmp_path / "demo1.zip.partial",
+        max_bytes=10,
+        progress_callback=lambda downloaded, total: progress.append((downloaded, total)),
+    )
+
+    assert result["bytes_downloaded"] == 6
+    assert (tmp_path / "demo1.zip.partial").read_bytes() == b"abcdef"
+    assert progress[-1] == (6, 6)
+
+
+def test_stream_to_file_size_limit_from_content_length(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"abcdef", headers={"Content-Length": "6"})
+
+    client = JenkinsClient(config(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(ResponseTooLargeError):
+        client.stream_to_file("job/demo/ws/**/*zip*/demo1.zip", tmp_path / "x", max_bytes=5)
+
+    assert not (tmp_path / "x").exists()
+
+
 @pytest.mark.parametrize("status", [401, 403, 404])
 def test_common_http_errors(status: int) -> None:
     def handler(request: httpx.Request) -> httpx.Response:

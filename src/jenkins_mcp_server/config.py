@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 from .errors import ConfigError
@@ -56,6 +57,13 @@ class JenkinsConfig:
     enable_writes: bool = False
     enable_job_config_write: bool = False
     enable_delete: bool = False
+    enable_workspace_download: bool = False
+    workspace_download_dir: Path | None = None
+    max_workspace_archive_bytes: int = 6_000_000_000
+    max_workspace_extract_bytes: int = 20_000_000_000
+    max_workspace_files: int = 200_000
+    max_bundle_log_bytes: int = 1_200_000_000
+    workspace_progress_interval_seconds: float = 2.0
 
     @classmethod
     def from_env(cls) -> JenkinsConfig:
@@ -83,6 +91,32 @@ class JenkinsConfig:
             enable_writes=_bool_env("JENKINS_MCP_ENABLE_WRITES", False),
             enable_job_config_write=_bool_env("JENKINS_MCP_ENABLE_JOB_CONFIG_WRITE", False),
             enable_delete=_bool_env("JENKINS_MCP_ENABLE_DELETE", False),
+            enable_workspace_download=_bool_env(
+                "JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD",
+                False,
+            ),
+            workspace_download_dir=(
+                Path(raw_download_dir).expanduser().resolve()
+                if (raw_download_dir := os.getenv("JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR"))
+                else None
+            ),
+            max_workspace_archive_bytes=_int_env(
+                "JENKINS_MCP_MAX_WORKSPACE_ARCHIVE_BYTES",
+                6_000_000_000,
+            ),
+            max_workspace_extract_bytes=_int_env(
+                "JENKINS_MCP_MAX_WORKSPACE_EXTRACT_BYTES",
+                20_000_000_000,
+            ),
+            max_workspace_files=_int_env("JENKINS_MCP_MAX_WORKSPACE_FILES", 200_000),
+            max_bundle_log_bytes=_int_env(
+                "JENKINS_MCP_MAX_BUNDLE_LOG_BYTES",
+                1_200_000_000,
+            ),
+            workspace_progress_interval_seconds=_float_env(
+                "JENKINS_MCP_WORKSPACE_PROGRESS_INTERVAL_SECONDS",
+                2.0,
+            ),
         )
 
     def require_writes(self) -> None:
@@ -106,3 +140,17 @@ class JenkinsConfig:
         self.require_job_config_write()
         if not self.enable_delete:
             raise PermissionGateError("Delete tools require JENKINS_MCP_ENABLE_DELETE=1")
+
+    def require_workspace_download(self) -> Path:
+        from .errors import PermissionGateError
+
+        if not self.enable_workspace_download:
+            raise PermissionGateError(
+                "Workspace bundle tools require JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1"
+            )
+        if self.workspace_download_dir is None:
+            raise PermissionGateError(
+                "Workspace bundle tools require JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR"
+            )
+        self.workspace_download_dir.mkdir(parents=True, exist_ok=True)
+        return self.workspace_download_dir

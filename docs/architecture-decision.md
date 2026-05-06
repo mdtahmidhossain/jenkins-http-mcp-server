@@ -23,7 +23,12 @@ HTTP transport was not added because STDIO is the requested first target for Cod
 - Write tools require `JENKINS_MCP_ENABLE_WRITES=1`.
 - Job config write tools require `JENKINS_MCP_ENABLE_JOB_CONFIG_WRITE=1`.
 - Delete requires `JENKINS_MCP_ENABLE_DELETE=1`.
+- Workspace bundle downloads require `JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1` and a local `JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR`.
 - Admin-like operations are not implemented: script console, restart, safe restart, quiet down, plugin install/update, credential read/write, node creation/deletion, global config changes, and user management.
+
+## Long-Running Downloads
+
+Workspace bundle downloads run asynchronously. `jenkins_start_workspace_bundle_download` resolves the build number, creates a local operation directory, and starts a background worker. Progress is written to `.progress.json` and returned by `jenkins_get_workspace_bundle_status`, including downloaded bytes, total bytes when Jenkins sends `Content-Length`, speed, elapsed seconds, phase, and paths. `jenkins_cancel_workspace_bundle_download` writes a cancel marker that the worker checks during download and extraction.
 
 ## Source of Truth
 

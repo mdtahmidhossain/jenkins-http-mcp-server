@@ -38,6 +38,20 @@ class ResponseTooLargeError(JenkinsMCPError):
         return data
 
 
+class OperationCancelledError(JenkinsMCPError):
+    code = "operation_cancelled"
+
+
+class WorkspaceBundleError(JenkinsMCPError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self._code = code
+
+    @property
+    def code(self) -> str:  # type: ignore[override]
+        return self._code
+
+
 @dataclass
 class JenkinsHTTPError(JenkinsMCPError):
     status_code: int

@@ -21,6 +21,7 @@ Use `rg` first:
 - POST endpoints: `@RequirePOST`, `@POST`, `doBuild`, `doBuildWithParameters`, `doStop`, `doDoDelete`
 - Config: `doConfigDotXml`, `updateByXml`, `createItem`
 - Logs/artifacts: `consoleText`, `progressiveText`, `getArtifacts`, `doArtifact`
+- Workspace archives: `doWs`, `DirectoryBrowserSupport`, `*zip*`, `Item.WORKSPACE`
 - Areas: `crumbIssuer`, `queue`, `computer`, `view`, `pluginManager`, `testReport`
 
 ## Classify Evidence

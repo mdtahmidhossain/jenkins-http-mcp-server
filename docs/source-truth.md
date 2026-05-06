@@ -58,6 +58,8 @@ Date checked: 2026-05-06
 - Build JSON API: `Run.getApi()` returns `new Api(this)` at `Run.java:1530-1532`.
 - Build log text: `Run.doConsoleText` serves raw console output at `Run.java:2217-2245`.
 - Progressive log binding: `Run.getLogText()` binds log text at `Run.java:1510-1515`; `AnnotatedLargeText.doProgressiveText` delegates to progress text at `AnnotatedLargeText.java:127-141`.
+- Workspace browsing: `AbstractProject.doWs` serves workspace files and checks `Item.WORKSPACE` at `AbstractProject.java:1905-1927`.
+- Workspace/directory zip: `DirectoryBrowserSupport` recognizes `*zip*` at `DirectoryBrowserSupport.java:221-226` and writes zip archives at `DirectoryBrowserSupport.java:262-275`.
 - Artifacts: `Run.getArtifacts()` is `@Exported` at `Run.java:1075-1080`; `Run.doArtifact()` serves artifacts at `Run.java:2183-2191`.
 - Queue API: `Queue.getApi()` at `Queue.java:1955-1957`; `Queue.getItems()` is exported at `Queue.java:787-805`.
 - Nodes/computers API: `Jenkins.getComputer()` binds `/computer/` at `Jenkins.java:1478-1485`; `ComputerSet.getApi()` at `ComputerSet.java:470-472`; `Computer.getApi()` at `Computer.java:1423-1425`.

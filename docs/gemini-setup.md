@@ -43,6 +43,13 @@ Equivalent project `settings.json` shape:
 
 Do not put real Jenkins secrets in this file. Export them in the shell that starts Gemini, or use your normal shell/profile secret handling.
 
+Workspace bundle downloads need separate env vars:
+
+```bash
+export JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1
+export JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR="/absolute/path/with/enough/disk"
+```
+
 ## Skills
 
 The canonical skills live in `.agents/skills/`. Local Gemini CLI help supports `gemini skills install <source>` and `gemini skills link <path>`. This repo also includes `.gemini/skills/` compatibility symlinks/copies when needed by a Gemini workspace.

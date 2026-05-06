@@ -45,6 +45,19 @@ export JENKINS_MCP_MAX_RESPONSE_BYTES=2000000
 export JENKINS_MCP_MAX_LOG_BYTES=200000
 ```
 
+Workspace bundle downloads are gated separately because they can be very large and may contain
+secrets or other untrusted files:
+
+```bash
+export JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1
+export JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR="/absolute/path/with/enough/disk"
+export JENKINS_MCP_MAX_WORKSPACE_ARCHIVE_BYTES=6000000000
+export JENKINS_MCP_MAX_WORKSPACE_EXTRACT_BYTES=20000000000
+export JENKINS_MCP_MAX_WORKSPACE_FILES=200000
+export JENKINS_MCP_MAX_BUNDLE_LOG_BYTES=1200000000
+export JENKINS_MCP_WORKSPACE_PROGRESS_INTERVAL_SECONDS=2
+```
+
 Write gates:
 
 ```bash
@@ -96,6 +109,13 @@ Read-only:
 - `jenkins_get_node`
 - `jenkins_list_plugins`
 
+Workspace bundle tools, gated by `JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1` and
+`JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR`:
+
+- `jenkins_start_workspace_bundle_download`
+- `jenkins_get_workspace_bundle_status`
+- `jenkins_cancel_workspace_bundle_download`
+
 Write tools, gated by `JENKINS_MCP_ENABLE_WRITES=1`:
 
 - `jenkins_trigger_build`
@@ -119,7 +139,9 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 
 - Read-only by default.
 - Write tools require explicit local env flags and Jenkins-side permissions.
+- Workspace bundle downloads require a separate explicit env flag and output directory.
 - Jenkins logs and job output are treated as untrusted text.
+- Jenkins workspace files are treated as untrusted local files.
 - API tokens and Authorization headers are not printed by server helpers.
 - 401, 403, 404, crumb failures, and permission failures return structured errors.
 
@@ -134,6 +156,8 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 - No user management.
 - `jenkins_get_test_report` depends on a test-report plugin such as JUnit exposing `testReport`; it fails clearly if absent.
 - Nested folder paths are URL-encoded as repeated `job/<segment>` path components. Controllers without the needed folder/job type return Jenkins 404s.
+- Workspace bundle downloads use Jenkins' job-level workspace endpoint. The saved console log is build-run-specific, but the workspace is the current/some available job workspace and may not be an immutable snapshot of that build.
+- Workspace bundle operations stream to disk and report status/progress through `jenkins_get_workspace_bundle_status`; large downloads can still stress Jenkins controllers or agents.
 
 ## Testing
 

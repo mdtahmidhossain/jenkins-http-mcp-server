@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
@@ -9,7 +10,12 @@ import httpx
 
 from .config import JenkinsConfig
 from .crumbs import CrumbManager
-from .errors import JenkinsHTTPError, PathValidationError, ResponseTooLargeError
+from .errors import (
+    JenkinsHTTPError,
+    OperationCancelledError,
+    PathValidationError,
+    ResponseTooLargeError,
+)
 
 Json = dict[str, Any] | list[Any]
 
@@ -212,6 +218,8 @@ class JenkinsClient:
         collected = bytearray()
         truncated = False
         with self.http.stream("GET", url) as response:
+            if response.status_code >= 400:
+                response.read()
             self._raise_for_status(response, "GET", relative)
             for chunk in response.iter_bytes():
                 remaining = limit - len(collected)
@@ -228,6 +236,47 @@ class JenkinsClient:
             "bytes_returned": len(collected),
             "truncated": truncated,
             "limit": limit,
+        }
+
+    def stream_to_file(
+        self,
+        path: str,
+        destination: Path,
+        *,
+        max_bytes: int,
+        progress_callback: Callable[[int, int | None], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        url, relative = self._url(path)
+        downloaded = 0
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        with self.http.stream("GET", url) as response:
+            self._raise_for_status(response, "GET", relative)
+            raw_total = response.headers.get("Content-Length")
+            total = int(raw_total) if raw_total and raw_total.isdigit() else None
+            if total is not None and total > max_bytes:
+                raise ResponseTooLargeError(max_bytes)
+
+            with destination.open("wb") as handle:
+                for chunk in response.iter_bytes():
+                    if cancel_check and cancel_check():
+                        raise OperationCancelledError("Operation was cancelled")
+                    if not chunk:
+                        continue
+                    downloaded += len(chunk)
+                    if downloaded > max_bytes:
+                        raise ResponseTooLargeError(max_bytes)
+                    handle.write(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, total)
+
+        if progress_callback:
+            progress_callback(downloaded, total)
+        return {
+            "path": str(destination),
+            "bytes_downloaded": downloaded,
+            "total_bytes": total,
         }
 
     def post(

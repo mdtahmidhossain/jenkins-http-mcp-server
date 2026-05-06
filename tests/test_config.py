@@ -26,6 +26,27 @@ def test_config_loading(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.max_log_bytes == 456
 
 
+def test_workspace_download_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("JENKINS_URL", "https://jenkins.example.com/")
+    monkeypatch.setenv("JENKINS_USER", "alice")
+    monkeypatch.setenv("JENKINS_API_TOKEN", "secret")
+    monkeypatch.setenv("JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD", "1")
+    monkeypatch.setenv("JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR", str(tmp_path / "bundles"))
+    monkeypatch.setenv("JENKINS_MCP_MAX_WORKSPACE_ARCHIVE_BYTES", "6000000000")
+    monkeypatch.setenv("JENKINS_MCP_MAX_WORKSPACE_EXTRACT_BYTES", "20000000000")
+    monkeypatch.setenv("JENKINS_MCP_MAX_WORKSPACE_FILES", "200000")
+    monkeypatch.setenv("JENKINS_MCP_MAX_BUNDLE_LOG_BYTES", "1200000000")
+
+    config = JenkinsConfig.from_env()
+
+    assert config.enable_workspace_download is True
+    assert config.require_workspace_download() == (tmp_path / "bundles").resolve()
+    assert config.max_workspace_archive_bytes == 6_000_000_000
+    assert config.max_workspace_extract_bytes == 20_000_000_000
+    assert config.max_workspace_files == 200_000
+    assert config.max_bundle_log_bytes == 1_200_000_000
+
+
 def test_config_requires_user_and_token_together(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JENKINS_URL", "https://jenkins.example.com/")
     monkeypatch.setenv("JENKINS_USER", "alice")
@@ -44,6 +65,8 @@ def test_write_gates_block_by_default() -> None:
         config.require_job_config_write()
     with pytest.raises(PermissionGateError):
         config.require_delete()
+    with pytest.raises(PermissionGateError):
+        config.require_workspace_download()
 
 
 def test_dangerous_delete_requires_separate_flag() -> None:

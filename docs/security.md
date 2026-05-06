@@ -27,6 +27,30 @@ The server assumes a non-admin Jenkins user. Jenkins remains the authority for p
 - `JENKINS_MCP_ENABLE_WRITES=1`: allows build trigger, build stop, queue cancel, enable job, and disable job tools.
 - `JENKINS_MCP_ENABLE_JOB_CONFIG_WRITE=1`: additionally allows job create/copy/update config.
 - `JENKINS_MCP_ENABLE_DELETE=1`: additionally allows job delete.
+- `JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1`: allows workspace bundle downloads when `JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR` is also set.
+
+## Workspace Bundle Downloads
+
+Workspace bundle tools can download large Jenkins workspace archives, extract them locally, delete the archive on success, and save the selected build run's console log. They are read-only against Jenkins but high impact locally and on the Jenkins controller/agent.
+
+Safety behavior:
+
+- Streams archive and console log to disk; does not return file contents through MCP.
+- Writes progress to `.progress.json` and exposes status by operation ID.
+- Uses `.partial` files/directories and renames only after successful steps.
+- Deletes partial archive files on download failure.
+- Deletes the archive after successful extraction by default.
+- Safely extracts zip files by rejecting absolute paths, `..` traversal, symlinks, special files, duplicate file entries, file count limit violations, and extracted byte limit violations.
+- Treats extracted files and console logs as untrusted.
+
+Recommended large-download env values:
+
+```bash
+JENKINS_MCP_MAX_WORKSPACE_ARCHIVE_BYTES=6000000000
+JENKINS_MCP_MAX_WORKSPACE_EXTRACT_BYTES=20000000000
+JENKINS_MCP_MAX_WORKSPACE_FILES=200000
+JENKINS_MCP_MAX_BUNDLE_LOG_BYTES=1200000000
+```
 
 ## Not Implemented
 

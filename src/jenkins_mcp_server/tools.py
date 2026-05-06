@@ -7,6 +7,11 @@ from mcp.server.fastmcp import FastMCP
 from .client import JenkinsClient, append_api_json, job_path, normalize_relative_path, safe_segment
 from .config import JenkinsConfig
 from .errors import JenkinsMCPError
+from .workspace_bundle import (
+    cancel_workspace_bundle,
+    read_workspace_bundle_status,
+    start_workspace_bundle_download,
+)
 
 
 def _ok(data: Any) -> dict[str, Any]:
@@ -346,6 +351,24 @@ def register_tools(mcp: FastMCP) -> None:
 
         return _run(op)
 
+    @mcp.tool()
+    def jenkins_start_workspace_bundle_download(
+        job: str | list[str],
+        build: int | str = "lastBuild",
+    ) -> dict[str, Any]:
+        """Start async workspace zip download, extraction, cleanup, and console log save."""
+        return _run(lambda: start_workspace_bundle_download(job, build))
+
+    @mcp.tool()
+    def jenkins_get_workspace_bundle_status(operation_id: str) -> dict[str, Any]:
+        """Get download/extract/log progress, bytes, speed, paths, and final status."""
+        return _run(lambda: read_workspace_bundle_status(operation_id))
+
+    @mcp.tool()
+    def jenkins_cancel_workspace_bundle_download(operation_id: str) -> dict[str, Any]:
+        """Request cancellation of a running workspace bundle operation."""
+        return _run(lambda: cancel_workspace_bundle(operation_id))
+
 
 READ_ONLY_TOOLS = [
     "jenkins_whoami",
@@ -383,4 +406,10 @@ OPTIONAL_JOB_CONFIG_TOOLS = [
     "jenkins_copy_job",
     "jenkins_update_job_config",
     "jenkins_delete_job",
+]
+
+WORKSPACE_BUNDLE_TOOLS = [
+    "jenkins_start_workspace_bundle_download",
+    "jenkins_get_workspace_bundle_status",
+    "jenkins_cancel_workspace_bundle_download",
 ]

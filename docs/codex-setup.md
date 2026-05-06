@@ -52,3 +52,10 @@ export JENKINS_MCP_ENABLE_WRITES=1
 ```
 
 Job config writes and deletes need additional flags documented in `docs/security.md`.
+
+Workspace bundle downloads need separate env vars:
+
+```bash
+export JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1
+export JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR="/absolute/path/with/enough/disk"
+```
