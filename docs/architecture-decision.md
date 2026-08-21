@@ -30,6 +30,8 @@ HTTP transport was not added because STDIO is the requested first target for Cod
 
 Workspace bundle downloads run asynchronously. `jenkins_start_workspace_bundle_download` resolves the build number, creates a local operation directory, and starts a background worker. Progress is written to `.progress.json` and returned by `jenkins_get_workspace_bundle_status`, including downloaded bytes, total bytes when Jenkins sends `Content-Length`, speed, elapsed seconds, phase, and paths. `jenkins_cancel_workspace_bundle_download` writes a cancel marker that the worker checks during download and extraction.
 
+`jenkins_start_workspace_path_download` uses the same async operation model for one requested workspace file or folder. File downloads stream directly to disk. Folder downloads use Jenkins' workspace zip support, extract locally, and delete the archive after successful extraction.
+
 ## Source of Truth
 
 Endpoint behavior is based on Jenkins 2.563 source under `vendor/jenkins` and official Jenkins documentation. Plugin-dependent behavior is marked explicitly.

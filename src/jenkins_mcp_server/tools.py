@@ -11,6 +11,7 @@ from .workspace_bundle import (
     cancel_workspace_bundle,
     read_workspace_bundle_status,
     start_workspace_bundle_download,
+    start_workspace_path_download,
 )
 
 
@@ -360,6 +361,16 @@ def register_tools(mcp: FastMCP) -> None:
         return _run(lambda: start_workspace_bundle_download(job, build))
 
     @mcp.tool()
+    def jenkins_start_workspace_path_download(
+        job: str | list[str],
+        workspace_path: str,
+        kind: str,
+        build: int | str = "lastBuild",
+    ) -> dict[str, Any]:
+        """Start async download of one workspace file or folder plus the build console log."""
+        return _run(lambda: start_workspace_path_download(job, workspace_path, kind, build))
+
+    @mcp.tool()
     def jenkins_get_workspace_bundle_status(operation_id: str) -> dict[str, Any]:
         """Get download/extract/log progress, bytes, speed, paths, and final status."""
         return _run(lambda: read_workspace_bundle_status(operation_id))
@@ -410,6 +421,7 @@ OPTIONAL_JOB_CONFIG_TOOLS = [
 
 WORKSPACE_BUNDLE_TOOLS = [
     "jenkins_start_workspace_bundle_download",
+    "jenkins_start_workspace_path_download",
     "jenkins_get_workspace_bundle_status",
     "jenkins_cancel_workspace_bundle_download",
 ]

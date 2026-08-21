@@ -31,7 +31,7 @@ The server assumes a non-admin Jenkins user. Jenkins remains the authority for p
 
 ## Workspace Bundle Downloads
 
-Workspace bundle tools can download large Jenkins workspace archives, extract them locally, delete the archive on success, and save the selected build run's console log. They are read-only against Jenkins but high impact locally and on the Jenkins controller/agent.
+Workspace bundle tools can download large Jenkins workspace archives, extract them locally, delete the archive on success, and save the selected build run's console log. Path-specific workspace tools can download one file directly or one folder as a zip that is extracted locally. They are read-only against Jenkins but high impact locally and on the Jenkins controller/agent.
 
 Safety behavior:
 
@@ -40,6 +40,7 @@ Safety behavior:
 - Uses `.partial` files/directories and renames only after successful steps.
 - Deletes partial archive files on download failure.
 - Deletes the archive after successful extraction by default.
+- Rejects unsafe requested workspace paths, including external URLs, absolute paths, `..` traversal, Jenkins magic path segments, and wildcards.
 - Safely extracts zip files by rejecting absolute paths, `..` traversal, symlinks, special files, duplicate file entries, file count limit violations, and extracted byte limit violations.
 - Treats extracted files and console logs as untrusted.
 

@@ -113,8 +113,13 @@ Workspace bundle tools, gated by `JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1` and
 `JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR`:
 
 - `jenkins_start_workspace_bundle_download`
+- `jenkins_start_workspace_path_download`
 - `jenkins_get_workspace_bundle_status`
 - `jenkins_cancel_workspace_bundle_download`
+
+`jenkins_start_workspace_path_download` downloads one workspace `file` or one
+workspace `folder` plus the selected build run's console log. Folder downloads
+are extracted locally and the zip archive is deleted after successful extraction.
 
 Write tools, gated by `JENKINS_MCP_ENABLE_WRITES=1`:
 
@@ -139,7 +144,7 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 
 - Read-only by default.
 - Write tools require explicit local env flags and Jenkins-side permissions.
-- Workspace bundle downloads require a separate explicit env flag and output directory.
+- Workspace and workspace-path downloads require a separate explicit env flag and output directory.
 - Jenkins logs and job output are treated as untrusted text.
 - Jenkins workspace files are treated as untrusted local files.
 - API tokens and Authorization headers are not printed by server helpers.
@@ -156,8 +161,8 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 - No user management.
 - `jenkins_get_test_report` depends on a test-report plugin such as JUnit exposing `testReport`; it fails clearly if absent.
 - Nested folder paths are URL-encoded as repeated `job/<segment>` path components. Controllers without the needed folder/job type return Jenkins 404s.
-- Workspace bundle downloads use Jenkins' job-level workspace endpoint. The saved console log is build-run-specific, but the workspace is the current/some available job workspace and may not be an immutable snapshot of that build.
-- Workspace bundle operations stream to disk and report status/progress through `jenkins_get_workspace_bundle_status`; large downloads can still stress Jenkins controllers or agents.
+- Workspace downloads use Jenkins' job-level workspace endpoint. The saved console log is build-run-specific, but the workspace is the current/some available job workspace and may not be an immutable snapshot of that build.
+- Workspace operations stream to disk and report status/progress through `jenkins_get_workspace_bundle_status`; large downloads can still stress Jenkins controllers or agents.
 
 ## Testing
 

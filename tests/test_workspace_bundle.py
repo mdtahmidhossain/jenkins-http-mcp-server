@@ -11,12 +11,14 @@ import pytest
 
 import jenkins_mcp_server.workspace_bundle as workspace_bundle
 from jenkins_mcp_server.config import JenkinsConfig
-from jenkins_mcp_server.errors import WorkspaceBundleError
+from jenkins_mcp_server.errors import PathValidationError, WorkspaceBundleError
 from jenkins_mcp_server.workspace_bundle import (
     ProgressFile,
     cancel_workspace_bundle,
+    normalize_workspace_path,
     read_workspace_bundle_status,
     start_workspace_bundle_download,
+    start_workspace_path_download,
 )
 
 
@@ -103,6 +105,122 @@ def test_workspace_bundle_download_extracts_deletes_archive_and_saves_log(
     assert status["console_log"]["speed_mib_per_second"] >= 0
 
 
+def test_workspace_folder_path_download_extracts_under_requested_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundles"
+    _set_workspace_env(monkeypatch, root)
+    folder_zip = _zip_bytes({"report.xml": b"<testsuite />"})
+    console_log = b"folder log\n"
+
+    class FakeClient:
+        def __init__(self, config: JenkinsConfig) -> None:
+            self.config = config
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            assert path == "job/my-job/lastBuild"
+            return {"number": 123}
+
+        def stream_to_file(
+            self,
+            path: str,
+            destination: Path,
+            *,
+            max_bytes: int,
+            progress_callback,
+            cancel_check,
+        ) -> dict[str, Any]:
+            if path == "job/my-job/ws/target/reports/**/*zip*/my-job123-target_reports.zip":
+                payload = folder_zip
+            elif path == "job/my-job/123/consoleText":
+                payload = console_log
+            else:  # pragma: no cover - assertion aid
+                raise AssertionError(path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(payload)
+            progress_callback(len(payload), len(payload))
+            assert not cancel_check()
+            return {"bytes_downloaded": len(payload), "total_bytes": len(payload)}
+
+    monkeypatch.setattr(workspace_bundle, "JenkinsClient", FakeClient)
+
+    started = start_workspace_path_download("my-job", "target/reports", "folder")
+    status = _wait_for_status(started["operation_id"])
+    output_dir = Path(started["output_dir"])
+
+    assert status["status"] == "succeeded"
+    assert not (output_dir / "my-job123-target_reports.zip").exists()
+    assert (output_dir / "workspace" / "target" / "reports" / "report.xml").read_bytes() == (
+        b"<testsuite />"
+    )
+    assert (output_dir / "my-job123-console.log").read_bytes() == console_log
+    assert status["workspace_path"] == "target/reports"
+    assert status["kind"] == "folder"
+
+
+def test_workspace_file_path_download_saves_file_and_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundles"
+    _set_workspace_env(monkeypatch, root)
+    file_content = b"<html>report</html>"
+    console_log = b"file log\n"
+
+    class FakeClient:
+        def __init__(self, config: JenkinsConfig) -> None:
+            self.config = config
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            assert path == "job/my-job/lastBuild"
+            return {"number": 123}
+
+        def stream_to_file(
+            self,
+            path: str,
+            destination: Path,
+            *,
+            max_bytes: int,
+            progress_callback,
+            cancel_check,
+        ) -> dict[str, Any]:
+            if path == "job/my-job/ws/target/report.html":
+                payload = file_content
+            elif path == "job/my-job/123/consoleText":
+                payload = console_log
+            else:  # pragma: no cover - assertion aid
+                raise AssertionError(path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(payload)
+            progress_callback(len(payload), len(payload))
+            assert not cancel_check()
+            return {"bytes_downloaded": len(payload), "total_bytes": len(payload)}
+
+    monkeypatch.setattr(workspace_bundle, "JenkinsClient", FakeClient)
+
+    started = start_workspace_path_download("my-job", "target/report.html", "file")
+    status = _wait_for_status(started["operation_id"])
+    output_dir = Path(started["output_dir"])
+
+    assert status["status"] == "succeeded"
+    assert (output_dir / "workspace" / "target" / "report.html").read_bytes() == file_content
+    assert (output_dir / "my-job123-console.log").read_bytes() == console_log
+    assert status["workspace_file"]["complete"] is True
+
+
 def test_workspace_bundle_cancel_writes_cancel_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -126,6 +244,29 @@ def test_workspace_bundle_cancel_writes_cancel_file(
     assert result["cancel_requested"] is True
     assert cancel_path.exists()
     assert status["cancel_requested"] is True
+
+
+@pytest.mark.parametrize(
+    "workspace_path",
+    [
+        "../secret.txt",
+        "/absolute/path",
+        "https://example.com/file",
+        "target/*zip*/x",
+        "target/*.xml",
+        "target/report.html?raw=1",
+    ],
+)
+def test_workspace_path_validation_rejects_unsafe_paths(workspace_path: str) -> None:
+    with pytest.raises(PathValidationError):
+        normalize_workspace_path(workspace_path)
+
+
+def test_workspace_path_download_rejects_invalid_kind() -> None:
+    with pytest.raises(WorkspaceBundleError) as error:
+        start_workspace_path_download("my-job", "target/report.html", "directory")
+
+    assert error.value.code == "invalid_workspace_path_kind"
 
 
 def test_safe_extract_rejects_zip_slip(tmp_path: Path) -> None:

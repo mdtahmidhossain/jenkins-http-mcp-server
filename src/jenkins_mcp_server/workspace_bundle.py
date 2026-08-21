@@ -11,6 +11,7 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 from .client import JenkinsClient, job_path, safe_segment
 from .config import JenkinsConfig
@@ -23,6 +24,7 @@ from .errors import (
 )
 
 JsonDict = dict[str, Any]
+WORKSPACE_MAGIC_SEGMENTS = {"*zip*", "*plain*", "*view*", "*fingerprint*"}
 
 
 class ProgressFile:
@@ -78,6 +80,39 @@ def safe_job_name(job: str | list[str]) -> str:
     if not pieces:
         raise PathValidationError("job must include at least one path segment")
     return "__".join(_safe_name(piece) for piece in pieces)
+
+
+def normalize_workspace_path(workspace_path: str) -> str:
+    raw = workspace_path.strip().replace("\\", "/")
+    if not raw:
+        raise PathValidationError("workspace_path must not be empty")
+    split = urlsplit(raw)
+    if split.scheme or split.netloc or raw.startswith("//"):
+        raise PathValidationError("workspace_path must be relative")
+    if split.query or split.fragment:
+        raise PathValidationError("workspace_path must not include query or fragment")
+    if split.path.startswith("/"):
+        raise PathValidationError("workspace_path must be relative")
+
+    parts: list[str] = []
+    for part in split.path.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            raise PathValidationError("workspace_path traversal is not allowed")
+        if part in WORKSPACE_MAGIC_SEGMENTS:
+            raise PathValidationError(f"workspace_path must not include Jenkins token {part}")
+        if "*" in part or "?" in part:
+            raise PathValidationError("workspace_path wildcards are not allowed")
+        parts.append(part)
+
+    if not parts:
+        raise PathValidationError("workspace_path must include a file or folder path")
+    return "/".join(parts)
+
+
+def _encoded_workspace_path(workspace_path: str) -> str:
+    return "/".join(quote(part, safe="") for part in workspace_path.split("/"))
 
 
 def operation_index_dir(root: Path) -> Path:
@@ -246,6 +281,111 @@ def start_workspace_bundle_download(
     }
 
 
+def start_workspace_path_download(
+    job: str | list[str],
+    workspace_path: str,
+    kind: str,
+    build: int | str = "lastBuild",
+) -> JsonDict:
+    if kind not in {"file", "folder"}:
+        raise WorkspaceBundleError(
+            "invalid_workspace_path_kind",
+            "kind must be either 'file' or 'folder'",
+        )
+
+    normalized_workspace_path = normalize_workspace_path(workspace_path)
+    config = JenkinsConfig.from_env()
+    root = config.require_workspace_download()
+    operation_id = uuid.uuid4().hex
+
+    with JenkinsClient(config) as client:
+        build_info = client.get_json(
+            f"{_build_path(job, build)}",
+            params={"tree": "number,url,fullDisplayName,result,building"},
+        )
+
+    try:
+        build_number = int(build_info["number"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WorkspaceBundleError(
+            "workspace_build_resolution_failed",
+            "Jenkins build API response did not include a numeric build number",
+        ) from exc
+
+    name_prefix = f"{safe_job_name(job)}{build_number}"
+    output_dir = _unique_output_dir(root, name_prefix, operation_id)
+    output_dir.mkdir(parents=True, exist_ok=False)
+
+    progress_path = output_dir / ".progress.json"
+    cancel_path = output_dir / ".cancel"
+    workspace_root = output_dir / "workspace"
+    target_path = workspace_root.joinpath(*normalized_workspace_path.split("/"))
+    archive_path = output_dir / f"{name_prefix}-{_safe_name(normalized_workspace_path)}.zip"
+    console_log_path = output_dir / f"{name_prefix}-console.log"
+    metadata_path = output_dir / "metadata.json"
+
+    progress = ProgressFile(
+        progress_path,
+        {
+            "operation_id": operation_id,
+            "status": "running",
+            "phase": "queued",
+            "operation": "workspace_path_download",
+            "job": job,
+            "requested_build": build,
+            "build_number": build_number,
+            "build": build_info,
+            "workspace_path": normalized_workspace_path,
+            "kind": kind,
+            "output_dir": str(output_dir),
+            "workspace_dir": str(workspace_root),
+            "target_path": str(target_path),
+            "archive_path": str(archive_path) if kind == "folder" else None,
+            "console_log_path": str(console_log_path),
+            "metadata_path": str(metadata_path),
+            "cancel_requested": False,
+            "created_at": _timestamp(),
+            "updated_at": _timestamp(),
+            "workspace_file": {},
+            "workspace_archive": {},
+            "extract": {},
+            "console_log": {},
+        },
+    )
+    _write_operation_index(root, operation_id, progress_path, cancel_path)
+
+    thread = threading.Thread(
+        target=_run_workspace_path_download,
+        name=f"jenkins-workspace-path-{operation_id[:8]}",
+        daemon=True,
+        kwargs={
+            "config": config,
+            "job": job,
+            "build_number": build_number,
+            "workspace_path": normalized_workspace_path,
+            "kind": kind,
+            "archive_path": archive_path,
+            "target_path": target_path,
+            "console_log_path": console_log_path,
+            "metadata_path": metadata_path,
+            "progress": progress,
+            "cancel_path": cancel_path,
+        },
+    )
+    thread.start()
+
+    return {
+        "operation_id": operation_id,
+        "job": job,
+        "build_number": build_number,
+        "workspace_path": normalized_workspace_path,
+        "kind": kind,
+        "output_dir": str(output_dir),
+        "progress_path": str(progress_path),
+        "status": "running",
+    }
+
+
 def _unique_output_dir(root: Path, name_prefix: str, operation_id: str) -> Path:
     candidate = root / name_prefix
     if not candidate.exists():
@@ -263,6 +403,20 @@ def _build_path(job: str | list[str], build: int | str) -> str:
 def _workspace_archive_path(job: str | list[str], filename: str) -> str:
     # The ** glob avoids Jenkins' default zip prefix so files extract directly under workspace/.
     return f"{job_path(job)}/ws/**/*zip*/{safe_segment(filename, 'archive filename')}"
+
+
+def _workspace_folder_archive_path(
+    job: str | list[str],
+    workspace_path: str,
+    filename: str,
+) -> str:
+    encoded_path = _encoded_workspace_path(workspace_path)
+    encoded_filename = safe_segment(filename, "archive filename")
+    return f"{job_path(job)}/ws/{encoded_path}/**/*zip*/{encoded_filename}"
+
+
+def _workspace_file_path(job: str | list[str], workspace_path: str) -> str:
+    return f"{job_path(job)}/ws/{_encoded_workspace_path(workspace_path)}"
 
 
 def _run_workspace_bundle(
@@ -354,6 +508,123 @@ def _run_workspace_bundle(
         )
     except Exception as exc:  # noqa: BLE001 - background task must persist errors to status.
         _cleanup_partial(archive_partial, workspace_partial, log_partial)
+        archive_path.unlink(missing_ok=True)
+        progress.update(
+            status="failed",
+            phase="failed",
+            error=_error_payload(exc, str(progress.data.get("phase", ""))),
+        )
+
+
+def _run_workspace_path_download(
+    *,
+    config: JenkinsConfig,
+    job: str | list[str],
+    build_number: int,
+    workspace_path: str,
+    kind: str,
+    archive_path: Path,
+    target_path: Path,
+    console_log_path: Path,
+    metadata_path: Path,
+    progress: ProgressFile,
+    cancel_path: Path,
+) -> None:
+    archive_partial = _partial_path(archive_path)
+    target_partial = _partial_path(target_path)
+    folder_partial = _partial_path(target_path)
+    log_partial = _partial_path(console_log_path)
+
+    def cancelled() -> bool:
+        return cancel_path.exists()
+
+    try:
+        with JenkinsClient(config) as client:
+            if kind == "file":
+                _download_with_progress(
+                    client=client,
+                    source_path=_workspace_file_path(job, workspace_path),
+                    partial_path=target_partial,
+                    final_path=target_path,
+                    max_bytes=config.max_workspace_archive_bytes,
+                    progress=progress,
+                    progress_key="workspace_file",
+                    phase="downloading_workspace_file",
+                    cancel_check=cancelled,
+                    interval_seconds=config.workspace_progress_interval_seconds,
+                )
+            else:
+                _download_with_progress(
+                    client=client,
+                    source_path=_workspace_folder_archive_path(
+                        job,
+                        workspace_path,
+                        archive_path.name,
+                    ),
+                    partial_path=archive_partial,
+                    final_path=archive_path,
+                    max_bytes=config.max_workspace_archive_bytes,
+                    progress=progress,
+                    progress_key="workspace_archive",
+                    phase="downloading_workspace_archive",
+                    cancel_check=cancelled,
+                    interval_seconds=config.workspace_progress_interval_seconds,
+                )
+                _raise_if_cancelled(cancelled)
+                _extract_zip_safely(
+                    archive_path=archive_path,
+                    partial_dir=folder_partial,
+                    final_dir=target_path,
+                    max_bytes=config.max_workspace_extract_bytes,
+                    max_files=config.max_workspace_files,
+                    progress=progress,
+                    cancel_check=cancelled,
+                    interval_seconds=config.workspace_progress_interval_seconds,
+                )
+                archive_path.unlink(missing_ok=True)
+                progress.update(archive_deleted=True)
+
+            _download_with_progress(
+                client=client,
+                source_path=f"{_build_path(job, build_number)}/consoleText",
+                partial_path=log_partial,
+                final_path=console_log_path,
+                max_bytes=config.max_bundle_log_bytes,
+                progress=progress,
+                progress_key="console_log",
+                phase="downloading_console_log",
+                cancel_check=cancelled,
+                interval_seconds=config.workspace_progress_interval_seconds,
+            )
+
+        metadata = {
+            "job": job,
+            "build_number": build_number,
+            "kind": kind,
+            "workspace_path": workspace_path,
+            "target_path": str(target_path),
+            "archive_deleted": kind == "folder",
+            "console_log_path": str(console_log_path),
+            "completed_at": _timestamp(),
+        }
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        progress.update(
+            status="succeeded",
+            phase="completed",
+            metadata_path=str(metadata_path),
+            completed_at=metadata["completed_at"],
+        )
+    except OperationCancelledError as exc:
+        _cleanup_partial(archive_partial, target_partial, folder_partial, log_partial)
+        archive_path.unlink(missing_ok=True)
+        progress.update(
+            status="cancelled",
+            phase="cancelled",
+            cancel_requested=True,
+            error={"code": exc.code, "message": str(exc)},
+        )
+    except Exception as exc:  # noqa: BLE001 - background task must persist errors to status.
+        _cleanup_partial(archive_partial, target_partial, folder_partial, log_partial)
         archive_path.unlink(missing_ok=True)
         progress.update(
             status="failed",
@@ -567,6 +838,10 @@ def _cleanup_partial(*paths: Path) -> None:
             path.unlink(missing_ok=True)
 
 
+def _partial_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.partial")
+
+
 def _error_payload(exc: Exception, phase: str = "") -> JsonDict:
     if isinstance(exc, JenkinsMCPError):
         cause = exc.to_dict()["error"]
@@ -587,6 +862,12 @@ def _error_payload(exc: Exception, phase: str = "") -> JsonDict:
         return {
             "code": "workspace_archive_download_failed",
             "message": "Workspace archive download failed",
+            "cause": cause,
+        }
+    if phase == "downloading_workspace_file":
+        return {
+            "code": "workspace_file_download_failed",
+            "message": "Workspace file download failed",
             "cause": cause,
         }
     if phase == "downloading_console_log":
