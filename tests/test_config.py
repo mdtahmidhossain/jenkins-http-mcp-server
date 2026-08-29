@@ -14,6 +14,7 @@ def test_config_loading(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JENKINS_TIMEOUT_SECONDS", "10.5")
     monkeypatch.setenv("JENKINS_MCP_MAX_RESPONSE_BYTES", "1234")
     monkeypatch.setenv("JENKINS_MCP_MAX_LOG_BYTES", "456")
+    monkeypatch.setenv("JENKINS_MCP_MAX_LOG_SCAN_BYTES", "789")
 
     config = JenkinsConfig.from_env()
 
@@ -24,6 +25,7 @@ def test_config_loading(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.timeout_seconds == 10.5
     assert config.max_response_bytes == 1234
     assert config.max_log_bytes == 456
+    assert config.max_log_scan_bytes == 789
 
 
 def test_workspace_download_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -47,6 +49,21 @@ def test_workspace_download_config(monkeypatch: pytest.MonkeyPatch, tmp_path) ->
     assert config.max_bundle_log_bytes == 1_200_000_000
 
 
+def test_artifact_download_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("JENKINS_URL", "https://jenkins.example.com/")
+    monkeypatch.setenv("JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD", "1")
+    monkeypatch.setenv("JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("JENKINS_MCP_MAX_ARTIFACT_BYTES", "123456")
+    monkeypatch.setenv("JENKINS_MCP_ARTIFACT_PROGRESS_INTERVAL_SECONDS", "1.5")
+
+    config = JenkinsConfig.from_env()
+
+    assert config.enable_artifact_download is True
+    assert config.require_artifact_download() == (tmp_path / "artifacts").resolve()
+    assert config.max_artifact_bytes == 123_456
+    assert config.artifact_progress_interval_seconds == 1.5
+
+
 def test_config_requires_user_and_token_together(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JENKINS_URL", "https://jenkins.example.com/")
     monkeypatch.setenv("JENKINS_USER", "alice")
@@ -67,6 +84,8 @@ def test_write_gates_block_by_default() -> None:
         config.require_delete()
     with pytest.raises(PermissionGateError):
         config.require_workspace_download()
+    with pytest.raises(PermissionGateError):
+        config.require_artifact_download()
 
 
 def test_dangerous_delete_requires_separate_flag() -> None:
@@ -132,3 +151,12 @@ def test_specific_write_and_workspace_directory_gates() -> None:
     )
     with pytest.raises(PermissionGateError, match="WORKSPACE_DOWNLOAD_DIR"):
         workspace_config.require_workspace_download()
+
+    artifact_config = JenkinsConfig(
+        url="https://jenkins.example.com/",
+        user="u",
+        api_token="t",
+        enable_artifact_download=True,
+    )
+    with pytest.raises(PermissionGateError, match="ARTIFACT_DOWNLOAD_DIR"):
+        artifact_config.require_artifact_download()

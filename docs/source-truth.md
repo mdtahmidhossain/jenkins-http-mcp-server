@@ -40,6 +40,8 @@ Date checked: 2026-08-30
 - `core/src/main/java/hudson/model/AbstractProject.java`
 - `core/src/main/java/hudson/model/DirectoryBrowserSupport.java`
 - `core/src/main/java/hudson/model/ItemGroupMixIn.java`
+- `bom/pom.xml`
+- Stapler `2107.v8dfcb_e8ed317` source JAR: `org/kohsuke/stapler/framework/io/LargeText.java`
 
 ## Relevant Line References
 
@@ -62,6 +64,10 @@ Date checked: 2026-08-30
 - Build JSON API: `Run.getApi()` returns `new Api(this)` at `Run.java:1530-1532`.
 - Build log text: `Run.doConsoleText` serves raw UTF-8 console output at `Run.java:2217-2245`.
 - Progressive log binding: `Run.getLogText()` binds log text at `Run.java:1510-1515`; `AnnotatedLargeText.doProgressiveText` delegates at `AnnotatedLargeText.java:127-141`.
+- Progressive log protocol: `bom/pom.xml:44` pins Stapler `2107.v8dfcb_e8ed317`.
+  `LargeText.doProgressTextImpl` reads the `start` cursor and emits `X-Text-Size` plus
+  `X-More-Data` at `LargeText.java:433-485` in the official Stapler source JAR from
+  `repo.jenkins-ci.org`.
 - Workspace browsing: `AbstractProject.doWs` serves workspace files and checks `Item.WORKSPACE` at `AbstractProject.java:1904-1927`.
 - Workspace/directory zip: `DirectoryBrowserSupport` recognizes `*zip*` at `DirectoryBrowserSupport.java:205-226` and writes zip archives at `DirectoryBrowserSupport.java:262-275`.
 - Artifacts: `Run.getArtifacts()` is `@Exported` at `Run.java:1075-1080`; `Run.doArtifact()` serves artifacts at `Run.java:2183-2191`.
@@ -77,7 +83,9 @@ Date checked: 2026-08-30
 - No route used by this MCP server changed.
 - Jenkins 2.568 changed job `config.xml` reads and updates to serialize the in-memory item. XML formatting, comments, and ordering are not byte-preserving; submitted plaintext secrets are encrypted on reserialization. See the [2026-06-10 security advisory](https://www.jenkins.io/security/advisory/2026-06-10/).
 - Jenkins 2.568 added an `Item/Read` check to the deprecated item-local queue cancellation endpoint. This server uses root `queue/cancelItem`, whose read and cancel checks remain at `Queue.java:756-774`.
-- Jenkins 2.569 fixed HTML/progressive log tailing for partial lines. This server reads raw `consoleText`, whose route and behavior remain unchanged.
+- Jenkins 2.569 fixed HTML/progressive log tailing for partial lines. This server uses raw
+  `consoleText` for bounded reads/search and Jenkins' `logText/progressiveText` cursor protocol for
+  chunk polling; both bindings remain present in 2.579.
 - Jenkins 2.570 added UTF-8 charsets when serving text files through directory browsers. Workspace file and zip byte streaming remain compatible.
 - [Jenkins 2.574](https://www.jenkins.io/changelog/2.574/) stopped bundling JUnit and several other detached plugins. `jenkins_get_test_report` remains plugin-dependent.
 - Jenkins 2.579 removed Apache Commons Lang 2 from core. The [2.579 changelog](https://www.jenkins.io/changelog/2.579/) instructs operators to update installed plugins before upgrading Jenkins.

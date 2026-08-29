@@ -3,13 +3,24 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jenkins-mcp-server"
-version = "0.1.0"
-description = "External Jenkins MCP server using Jenkins HTTP APIs"
+name = "jenkins-http-mcp-server"
+version = "0.2.0"
+description = "External MCP server for Jenkins using normal Jenkins HTTP APIs"
 readme = "README.md"
 requires-python = ">=3.14"
-license = { text = "MIT" }
-authors = [{ name = "Local" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "mdtahmidhossain" }]
+keywords = ["jenkins", "mcp", "codex", "gemini", "automation"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Build Tools",
+]
 dependencies = [
   "httpx>=0.28.1",
   "mcp[cli]>=2.1.1,<3",
@@ -21,6 +32,16 @@ dev = [
   "pytest-cov>=7.1.0",
   "ruff>=0.14",
 ]
+release = [
+  "build>=1.2",
+  "twine>=6.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/mdtahmidhossain/jenkins-http-mcp-server"
+Documentation = "https://github.com/mdtahmidhossain/jenkins-http-mcp-server#readme"
+Issues = "https://github.com/mdtahmidhossain/jenkins-http-mcp-server/issues"
+Source = "https://github.com/mdtahmidhossain/jenkins-http-mcp-server"
 
 [project.scripts]
 jenkins-mcp-server = "jenkins_mcp_server.__main__:main"

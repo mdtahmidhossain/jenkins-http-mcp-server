@@ -59,3 +59,10 @@ Workspace bundle downloads need separate env vars:
 export JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1
 export JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR="/absolute/path/with/enough/disk"
 ```
+
+Individual artifact downloads use a separate gate:
+
+```bash
+export JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD=1
+export JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR="/absolute/path/for/artifacts"
+```

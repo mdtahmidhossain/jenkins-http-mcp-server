@@ -13,6 +13,7 @@ from jenkins_mcp_server.crumbs import CrumbManager
 from jenkins_mcp_server.errors import (
     JenkinsHTTPError,
     JenkinsMCPError,
+    JenkinsProtocolError,
     ResponseTooLargeError,
     WorkspaceBundleError,
 )
@@ -60,6 +61,31 @@ def test_crumb_manager_ignores_incomplete_payload() -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         assert CrumbManager().get(client, "https://jenkins.example.com/") is None
+
+
+def test_crumb_manager_bounds_and_validates_payloads() -> None:
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b"x" * 6))
+    ) as client, pytest.raises(ResponseTooLargeError):
+        CrumbManager(max_bytes=5).get(client, "https://jenkins.example.com/")
+
+    class Chunks(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"abc"
+            yield b"def"
+
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=Chunks()))
+    ) as client, pytest.raises(ResponseTooLargeError):
+        CrumbManager(max_bytes=5).get(client, "https://jenkins.example.com/")
+
+    for payload, message in [(b"not-json", "valid JSON"), (b"[]", "JSON object")]:
+        with httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request, payload=payload: httpx.Response(200, content=payload)
+            )
+        ) as client, pytest.raises(JenkinsProtocolError, match=message):
+            CrumbManager().get(client, "https://jenkins.example.com/")
 
 
 def test_structured_base_and_size_errors() -> None:
@@ -130,4 +156,5 @@ def test_safety_resource_returns_operational_guards() -> None:
     safety = resources["jenkins-mcp://safety"]()
     assert "read-only by default" in safety
     assert "JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1" in safety
+    assert "JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD=1" in safety
     assert "untrusted text" in safety

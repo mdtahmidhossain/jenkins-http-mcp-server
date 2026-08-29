@@ -54,6 +54,7 @@ class JenkinsConfig:
     timeout_seconds: float = 30.0
     max_response_bytes: int = 2_000_000
     max_log_bytes: int = 200_000
+    max_log_scan_bytes: int = 1_200_000_000
     enable_writes: bool = False
     enable_job_config_write: bool = False
     enable_delete: bool = False
@@ -64,6 +65,10 @@ class JenkinsConfig:
     max_workspace_files: int = 200_000
     max_bundle_log_bytes: int = 1_200_000_000
     workspace_progress_interval_seconds: float = 2.0
+    enable_artifact_download: bool = False
+    artifact_download_dir: Path | None = None
+    max_artifact_bytes: int = 6_000_000_000
+    artifact_progress_interval_seconds: float = 2.0
 
     @classmethod
     def from_env(cls) -> JenkinsConfig:
@@ -88,6 +93,10 @@ class JenkinsConfig:
             timeout_seconds=_float_env("JENKINS_TIMEOUT_SECONDS", 30.0),
             max_response_bytes=_int_env("JENKINS_MCP_MAX_RESPONSE_BYTES", 2_000_000),
             max_log_bytes=_int_env("JENKINS_MCP_MAX_LOG_BYTES", 200_000),
+            max_log_scan_bytes=_int_env(
+                "JENKINS_MCP_MAX_LOG_SCAN_BYTES",
+                1_200_000_000,
+            ),
             enable_writes=_bool_env("JENKINS_MCP_ENABLE_WRITES", False),
             enable_job_config_write=_bool_env("JENKINS_MCP_ENABLE_JOB_CONFIG_WRITE", False),
             enable_delete=_bool_env("JENKINS_MCP_ENABLE_DELETE", False),
@@ -115,6 +124,23 @@ class JenkinsConfig:
             ),
             workspace_progress_interval_seconds=_float_env(
                 "JENKINS_MCP_WORKSPACE_PROGRESS_INTERVAL_SECONDS",
+                2.0,
+            ),
+            enable_artifact_download=_bool_env(
+                "JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD",
+                False,
+            ),
+            artifact_download_dir=(
+                Path(raw_artifact_dir).expanduser().resolve()
+                if (raw_artifact_dir := os.getenv("JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR"))
+                else None
+            ),
+            max_artifact_bytes=_int_env(
+                "JENKINS_MCP_MAX_ARTIFACT_BYTES",
+                6_000_000_000,
+            ),
+            artifact_progress_interval_seconds=_float_env(
+                "JENKINS_MCP_ARTIFACT_PROGRESS_INTERVAL_SECONDS",
                 2.0,
             ),
         )
@@ -154,3 +180,17 @@ class JenkinsConfig:
             )
         self.workspace_download_dir.mkdir(parents=True, exist_ok=True)
         return self.workspace_download_dir
+
+    def require_artifact_download(self) -> Path:
+        from .errors import PermissionGateError
+
+        if not self.enable_artifact_download:
+            raise PermissionGateError(
+                "Artifact download tools require JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD=1"
+            )
+        if self.artifact_download_dir is None:
+            raise PermissionGateError(
+                "Artifact download tools require JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR"
+            )
+        self.artifact_download_dir.mkdir(parents=True, exist_ok=True)
+        return self.artifact_download_dir

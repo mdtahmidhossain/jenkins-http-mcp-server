@@ -395,7 +395,7 @@ def test_workspace_bundle_runner_persists_cancellation_and_failure(
     cancel_dir = tmp_path / "cancel-bundle"
     cancel_progress = ProgressFile(
         cancel_dir / ".progress.json",
-        {"status": "running", "phase": "queued"},
+        {"operation_id": "cancel-bundle", "status": "running", "phase": "queued"},
     )
 
     def cancel_download(**kwargs: Any) -> None:
@@ -420,7 +420,7 @@ def test_workspace_bundle_runner_persists_cancellation_and_failure(
     failed_dir = tmp_path / "failed-bundle"
     failed_progress = ProgressFile(
         failed_dir / ".progress.json",
-        {"status": "running", "phase": "queued"},
+        {"operation_id": "failed-bundle", "status": "running", "phase": "queued"},
     )
 
     def fail_download(**kwargs: Any) -> None:
@@ -465,7 +465,7 @@ def test_workspace_path_runner_persists_cancellation_and_failure(
         output_dir = tmp_path / output_name
         progress = ProgressFile(
             output_dir / ".progress.json",
-            {"status": "running", "phase": "queued"},
+            {"operation_id": output_name, "status": "running", "phase": "queued"},
         )
         monkeypatch.setattr(workspace_bundle, "_download_with_progress", download)
         workspace_bundle._run_workspace_path_download(

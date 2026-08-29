@@ -4,11 +4,17 @@ from typing import Any
 
 from mcp.server import MCPServer
 
+from .artifact_download import (
+    cancel_artifact_download,
+    read_artifact_download_status,
+    start_artifact_download,
+)
 from .client import JenkinsClient, append_api_json, job_path, normalize_relative_path, safe_segment
 from .config import JenkinsConfig
-from .errors import JenkinsMCPError
+from .errors import JenkinsMCPError, ToolInputError
 from .workspace_bundle import (
     cancel_workspace_bundle,
+    cleanup_workspace_bundle_operations,
     read_workspace_bundle_status,
     start_workspace_bundle_download,
     start_workspace_path_download,
@@ -158,10 +164,77 @@ def register_tools(mcp: MCPServer) -> None:
         return _run(op)
 
     @mcp.tool()
+    def jenkins_get_build_log_chunk(
+        job: str | list[str],
+        build: int | str,
+        start: int = 0,
+    ) -> dict[str, Any]:
+        """Read one progressive log response and return Jenkins' next safe cursor."""
+
+        def op() -> dict[str, Any]:
+            with _client() as client:
+                return client.get_progressive_text(
+                    f"{_build_path(job, build)}/logText/progressiveText",
+                    start=start,
+                    limit=client.config.max_log_bytes,
+                )
+
+        return _run(op)
+
+    @mcp.tool()
+    def jenkins_search_build_log(
+        job: str | list[str],
+        build: int | str,
+        pattern: str,
+        max_scan_bytes: int | None = None,
+        max_matches: int = 20,
+    ) -> dict[str, Any]:
+        """Stream and search bounded consoleText for an exact, case-sensitive literal."""
+
+        def op() -> dict[str, Any]:
+            with _client() as client:
+                scan_limit = (
+                    client.config.max_log_scan_bytes
+                    if max_scan_bytes is None
+                    else max_scan_bytes
+                )
+                if scan_limit > client.config.max_log_scan_bytes:
+                    raise ToolInputError(
+                        "max_scan_bytes exceeds JENKINS_MCP_MAX_LOG_SCAN_BYTES"
+                    )
+                return client.search_text(
+                    f"{_build_path(job, build)}/consoleText",
+                    pattern=pattern,
+                    max_scan_bytes=scan_limit,
+                    max_matches=max_matches,
+                )
+
+        return _run(op)
+
+    @mcp.tool()
     def jenkins_get_build_artifacts(job: str | list[str], build: int | str) -> dict[str, Any]:
         """List artifacts exported on a build JSON API response."""
         tree = "artifacts[displayPath,fileName,relativePath]"
         return _run(lambda: _get_json(_build_path(job, build), params={"tree": tree}))
+
+    @mcp.tool()
+    def jenkins_start_artifact_download(
+        job: str | list[str],
+        artifact_path: str,
+        build: int | str = "lastBuild",
+    ) -> dict[str, Any]:
+        """Start a gated async download of one archived build artifact to local disk."""
+        return _run(lambda: start_artifact_download(job, artifact_path, build))
+
+    @mcp.tool()
+    def jenkins_get_artifact_download_status(operation_id: str) -> dict[str, Any]:
+        """Get artifact download bytes, speed, paths, and final status."""
+        return _run(lambda: read_artifact_download_status(operation_id))
+
+    @mcp.tool()
+    def jenkins_cancel_artifact_download(operation_id: str) -> dict[str, Any]:
+        """Request cancellation of a running artifact download."""
+        return _run(lambda: cancel_artifact_download(operation_id))
 
     @mcp.tool()
     def jenkins_get_test_report(job: str | list[str], build: int | str) -> dict[str, Any]:
@@ -380,6 +453,16 @@ def register_tools(mcp: MCPServer) -> None:
         """Request cancellation of a running workspace bundle operation."""
         return _run(lambda: cancel_workspace_bundle(operation_id))
 
+    @mcp.tool()
+    def jenkins_cleanup_workspace_bundle_operations(
+        older_than_days: int = 30,
+        max_operations: int = 100,
+    ) -> dict[str, Any]:
+        """Delete bounded, terminal local workspace operations older than the requested age."""
+        return _run(
+            lambda: cleanup_workspace_bundle_operations(older_than_days, max_operations)
+        )
+
 
 READ_ONLY_TOOLS = [
     "jenkins_whoami",
@@ -392,6 +475,8 @@ READ_ONLY_TOOLS = [
     "jenkins_list_builds",
     "jenkins_get_build",
     "jenkins_get_build_log",
+    "jenkins_get_build_log_chunk",
+    "jenkins_search_build_log",
     "jenkins_get_build_artifacts",
     "jenkins_get_test_report",
     "jenkins_list_queue",
@@ -424,4 +509,11 @@ WORKSPACE_BUNDLE_TOOLS = [
     "jenkins_start_workspace_path_download",
     "jenkins_get_workspace_bundle_status",
     "jenkins_cancel_workspace_bundle_download",
+    "jenkins_cleanup_workspace_bundle_operations",
+]
+
+ARTIFACT_DOWNLOAD_TOOLS = [
+    "jenkins_start_artifact_download",
+    "jenkins_get_artifact_download_status",
+    "jenkins_cancel_artifact_download",
 ]

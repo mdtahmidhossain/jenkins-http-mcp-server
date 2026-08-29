@@ -25,6 +25,10 @@ class PathValidationError(JenkinsMCPError):
     code = "invalid_jenkins_path"
 
 
+class ToolInputError(JenkinsMCPError):
+    code = "invalid_tool_input"
+
+
 class ResponseTooLargeError(JenkinsMCPError):
     code = "response_too_large"
 
@@ -40,6 +44,74 @@ class ResponseTooLargeError(JenkinsMCPError):
 
 class OperationCancelledError(JenkinsMCPError):
     code = "operation_cancelled"
+
+
+class JenkinsProtocolError(JenkinsMCPError):
+    code = "jenkins_protocol_error"
+
+
+@dataclass
+class JenkinsTransportError(JenkinsMCPError):
+    kind: str
+    method: str
+    path: str
+    attempts: int
+
+    @property
+    def code(self) -> str:  # type: ignore[override]
+        return {
+            "timeout": "jenkins_timeout",
+            "tls": "jenkins_tls_error",
+            "connection": "jenkins_connection_error",
+        }.get(self.kind, "jenkins_transport_error")
+
+    def __str__(self) -> str:
+        messages = {
+            "timeout": "Jenkins request timed out",
+            "tls": "Jenkins TLS validation failed",
+            "connection": "Could not connect to Jenkins",
+        }
+        message = messages.get(self.kind, "Jenkins transport failed")
+        return f"{message}: {self.method} {self.path} after {self.attempts} attempt(s)"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": {
+                "code": self.code,
+                "message": str(self),
+                "method": self.method,
+                "path": self.path,
+                "attempts": self.attempts,
+            },
+        }
+
+
+@dataclass
+class InsufficientDiskSpaceError(JenkinsMCPError):
+    required_bytes: int
+    available_bytes: int
+    path: str
+
+    code = "insufficient_disk_space"
+
+    def __str__(self) -> str:
+        return (
+            f"Insufficient free disk space under {self.path}: "
+            f"need {self.required_bytes} bytes, have {self.available_bytes} bytes"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": {
+                "code": self.code,
+                "message": str(self),
+                "required_bytes": self.required_bytes,
+                "available_bytes": self.available_bytes,
+                "path": self.path,
+            },
+        }
 
 
 class WorkspaceBundleError(JenkinsMCPError):

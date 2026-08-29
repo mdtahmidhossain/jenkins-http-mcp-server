@@ -46,6 +46,7 @@ export JENKINS_VERIFY_SSL=1
 export JENKINS_TIMEOUT_SECONDS=30
 export JENKINS_MCP_MAX_RESPONSE_BYTES=2000000
 export JENKINS_MCP_MAX_LOG_BYTES=200000
+export JENKINS_MCP_MAX_LOG_SCAN_BYTES=1200000000
 ```
 
 Workspace bundle downloads are gated separately because they can be very large and may contain
@@ -59,6 +60,15 @@ export JENKINS_MCP_MAX_WORKSPACE_EXTRACT_BYTES=20000000000
 export JENKINS_MCP_MAX_WORKSPACE_FILES=200000
 export JENKINS_MCP_MAX_BUNDLE_LOG_BYTES=1200000000
 export JENKINS_MCP_WORKSPACE_PROGRESS_INTERVAL_SECONDS=2
+```
+
+Individual artifact downloads have their own local gate and output directory:
+
+```bash
+export JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD=1
+export JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR="/absolute/path/for/artifacts"
+export JENKINS_MCP_MAX_ARTIFACT_BYTES=6000000000
+export JENKINS_MCP_ARTIFACT_PROGRESS_INTERVAL_SECONDS=2
 ```
 
 Write gates:
@@ -102,6 +112,8 @@ Read-only:
 - `jenkins_list_builds`
 - `jenkins_get_build`
 - `jenkins_get_build_log`
+- `jenkins_get_build_log_chunk`
+- `jenkins_search_build_log`
 - `jenkins_get_build_artifacts`
 - `jenkins_get_test_report`
 - `jenkins_list_queue`
@@ -119,10 +131,21 @@ Workspace bundle tools, gated by `JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1` and
 - `jenkins_start_workspace_path_download`
 - `jenkins_get_workspace_bundle_status`
 - `jenkins_cancel_workspace_bundle_download`
+- `jenkins_cleanup_workspace_bundle_operations`
 
 `jenkins_start_workspace_path_download` downloads one workspace `file` or one
 workspace `folder` plus the selected build run's console log. Folder downloads
 are extracted locally and the zip archive is deleted after successful extraction.
+
+Artifact download tools, gated by `JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD=1` and
+`JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR`:
+
+- `jenkins_start_artifact_download`
+- `jenkins_get_artifact_download_status`
+- `jenkins_cancel_artifact_download`
+
+Artifact files stream directly to disk. MCP responses contain progress and local paths, not file
+contents or base64 data.
 
 Write tools, gated by `JENKINS_MCP_ENABLE_WRITES=1`:
 
@@ -148,10 +171,14 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 - Read-only by default.
 - Write tools require explicit local env flags and Jenkins-side permissions.
 - Workspace and workspace-path downloads require a separate explicit env flag and output directory.
+- Artifact downloads require their own explicit env flag and output directory.
 - Jenkins logs and job output are treated as untrusted text.
 - Jenkins workspace files are treated as untrusted local files.
 - API tokens and Authorization headers are not printed by server helpers.
 - 401, 403, 404, crumb failures, and permission failures return structured errors.
+- HTTP response limits are enforced while bytes arrive. Transient GET failures are retried up to
+  three attempts; POST requests are never automatically replayed.
+- Large local downloads preflight free disk space, use partial paths, and remove failed partials.
 
 ## Limitations
 
@@ -162,6 +189,8 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 - No node creation/deletion.
 - No global config changes.
 - No user management.
+- "Plugin-dependent" means Jenkins core does not guarantee that endpoint; it exists only when an
+  installed plugin provides it. This server never installs or enables that plugin.
 - `jenkins_get_test_report` depends on a test-report plugin such as JUnit exposing `testReport`; it fails clearly if absent.
 - Jenkins 2.574 stopped bundling JUnit. Controllers that do not already have the JUnit plugin may not expose `testReport`.
 - Jenkins 2.579 removed Apache Commons Lang 2 from core. Update installed plugins before upgrading Jenkins because outdated plugins that relied on the core-provided library may fail to load.
@@ -169,6 +198,13 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 - Nested folder paths are URL-encoded as repeated `job/<segment>` path components. Controllers without the needed folder/job type return Jenkins 404s.
 - Workspace downloads use Jenkins' job-level workspace endpoint. The saved console log is build-run-specific, but the workspace is the current/some available job workspace and may not be an immutable snapshot of that build.
 - Workspace operations stream to disk and report status/progress through `jenkins_get_workspace_bundle_status`; large downloads can still stress Jenkins controllers or agents.
+- Background download workers do not survive MCP server exit. A later status check marks an
+  interrupted operation failed and removes its partial files; restart the download explicitly.
+- Progressive log chunks must fit `JENKINS_MCP_MAX_LOG_BYTES`. If Jenkins has accumulated a larger
+  interval than the limit, the tool returns `response_too_large` without advancing the cursor.
+- Build artifacts are archived build outputs. Workspace files are separate, current job-level data.
+- GET redirects are rejected instead of followed. Artifact-manager plugins that require an external
+  storage redirect are unsupported and return a clear redirect error.
 
 ## Testing
 
@@ -183,6 +219,12 @@ ruff check
 `python -m pytest` reports missing lines in the terminal and writes `coverage.xml`.
 GitHub Actions also publishes the coverage table in the workflow run summary. The test command
 enforces 100% source line coverage locally and in CI.
+
+## Releases
+
+The package distribution name is `jenkins-http-mcp-server`. Release builds and tokenless PyPI
+trusted publishing are documented in `docs/releasing.md`. The source is licensed under the MIT
+License; see `LICENSE` and `SECURITY.md`.
 
 Optional integration tests only run when all are set:
 

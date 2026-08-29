@@ -10,6 +10,7 @@ import jenkins_mcp_server.tools as tool_module
 from jenkins_mcp_server.__main__ import build_server
 from jenkins_mcp_server.errors import PathValidationError
 from jenkins_mcp_server.tools import (
+    ARTIFACT_DOWNLOAD_TOOLS,
     OPTIONAL_JOB_CONFIG_TOOLS,
     READ_ONLY_TOOLS,
     WORKSPACE_BUNDLE_TOOLS,
@@ -25,6 +26,7 @@ def test_tool_schemas_registered() -> None:
     assert set(WRITE_TOOLS).issubset(registered)
     assert set(OPTIONAL_JOB_CONFIG_TOOLS).issubset(registered)
     assert set(WORKSPACE_BUNDLE_TOOLS).issubset(registered)
+    assert set(ARTIFACT_DOWNLOAD_TOOLS).issubset(registered)
 
 
 def test_tool_schema_has_parameters() -> None:
@@ -59,7 +61,7 @@ def test_tool_helpers_build_paths_queries_and_client(monkeypatch: pytest.MonkeyP
 def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeReadClient:
         def __init__(self) -> None:
-            self.config = SimpleNamespace(max_log_bytes=64)
+            self.config = SimpleNamespace(max_log_bytes=64, max_log_scan_bytes=1_000)
             self.calls: list[tuple[str, str, Any]] = []
 
         def __enter__(self):
@@ -79,6 +81,31 @@ def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.Monke
         def get_text_limited(self, path: str, *, limit: int) -> dict[str, Any]:
             self.calls.append(("limited", path, limit))
             return {"text": "log", "limit": limit}
+
+        def get_progressive_text(self, path: str, *, start: int, limit: int) -> dict[str, Any]:
+            self.calls.append(("progressive", path, {"start": start, "limit": limit}))
+            return {"text": "chunk", "next_start": 20}
+
+        def search_text(
+            self,
+            path: str,
+            *,
+            pattern: str,
+            max_scan_bytes: int,
+            max_matches: int,
+        ) -> dict[str, Any]:
+            self.calls.append(
+                (
+                    "search",
+                    path,
+                    {
+                        "pattern": pattern,
+                        "max_scan_bytes": max_scan_bytes,
+                        "max_matches": max_matches,
+                    },
+                )
+            )
+            return {"matches": [], "bytes_scanned": max_scan_bytes}
 
         def request(
             self,
@@ -121,6 +148,16 @@ def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.Monke
         "text": "log",
         "limit": 64,
     }
+    assert _tool_fn(server, "jenkins_get_build_log_chunk")("folder/demo", 12, 5)["data"][
+        "next_start"
+    ] == 20
+    assert _tool_fn(server, "jenkins_search_build_log")(
+        "folder/demo",
+        12,
+        "ERROR",
+        None,
+        10,
+    )["data"]["bytes_scanned"] == 1_000
     assert _tool_fn(server, "jenkins_get_build_artifacts")("folder/demo", 12)["ok"]
     assert _tool_fn(server, "jenkins_get_test_report")("folder/demo", 12)["ok"]
     assert _tool_fn(server, "jenkins_list_queue")("items[id]")["ok"]
@@ -135,6 +172,7 @@ def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.Monke
     assert "queue/api/json?depth=1" in paths
     assert "job/folder/job/demo/config.xml" in paths
     assert "job/folder/job/demo/12/consoleText" in paths
+    assert "job/folder/job/demo/12/logText/progressiveText" in paths
     assert "computer/%28built-in%29" in paths
     assert "pluginManager" in paths
 
@@ -255,6 +293,11 @@ def test_workspace_tools_delegate_to_bundle_operations(monkeypatch: pytest.Monke
         "cancel_workspace_bundle",
         lambda operation_id: {"operation_id": operation_id, "cancel_requested": True},
     )
+    monkeypatch.setattr(
+        tool_module,
+        "cleanup_workspace_bundle_operations",
+        lambda days, maximum: {"older_than_days": days, "max_operations": maximum},
+    )
     server = build_server()
 
     assert _tool_fn(server, "jenkins_start_workspace_bundle_download")("demo", 12)["data"][
@@ -269,3 +312,61 @@ def test_workspace_tools_delegate_to_bundle_operations(monkeypatch: pytest.Monke
     assert _tool_fn(server, "jenkins_cancel_workspace_bundle_download")("a" * 32)["data"][
         "cancel_requested"
     ] is True
+    assert _tool_fn(server, "jenkins_cleanup_workspace_bundle_operations")(14, 25)["data"] == {
+        "older_than_days": 14,
+        "max_operations": 25,
+    }
+
+
+def test_artifact_tools_delegate_to_download_operations(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        tool_module,
+        "start_artifact_download",
+        lambda job, path, build: {"job": job, "path": path, "build": build},
+    )
+    monkeypatch.setattr(
+        tool_module,
+        "read_artifact_download_status",
+        lambda operation_id: {"operation_id": operation_id, "status": "running"},
+    )
+    monkeypatch.setattr(
+        tool_module,
+        "cancel_artifact_download",
+        lambda operation_id: {"operation_id": operation_id, "cancel_requested": True},
+    )
+    server = build_server()
+
+    started = _tool_fn(server, "jenkins_start_artifact_download")(
+        "demo",
+        "reports/result.zip",
+        12,
+    )
+    assert started["data"]["path"] == "reports/result.zip"
+    assert _tool_fn(server, "jenkins_get_artifact_download_status")("a" * 32)["data"][
+        "status"
+    ] == "running"
+    assert _tool_fn(server, "jenkins_cancel_artifact_download")("a" * 32)["data"][
+        "cancel_requested"
+    ] is True
+
+
+def test_log_search_tool_rejects_scan_above_configured_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        config = SimpleNamespace(max_log_scan_bytes=100)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(tool_module, "_client", lambda: FakeClient())
+    result = _tool_fn(build_server(), "jenkins_search_build_log")(
+        "demo",
+        1,
+        "ERROR",
+        101,
+    )
+    assert result["error"]["code"] == "invalid_tool_input"

@@ -13,18 +13,24 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-from .client import JenkinsClient, job_path, safe_segment
+from .client import JenkinsClient, ensure_free_space, job_path, safe_segment
 from .config import JenkinsConfig
 from .errors import (
     JenkinsMCPError,
     OperationCancelledError,
     PathValidationError,
     ResponseTooLargeError,
+    ToolInputError,
     WorkspaceBundleError,
 )
 
 JsonDict = dict[str, Any]
 WORKSPACE_MAGIC_SEGMENTS = {"*zip*", "*plain*", "*view*", "*fingerprint*"}
+TERMINAL_OPERATION_STATUSES = {"succeeded", "failed", "cancelled"}
+WORKSPACE_OPERATION_TYPES = {None, "workspace_bundle", "workspace_path_download"}
+_SERVER_INSTANCE_ID = uuid.uuid4().hex
+_ACTIVE_OPERATIONS: dict[str, threading.Thread] = {}
+_ACTIVE_OPERATIONS_LOCK = threading.Lock()
 
 
 class ProgressFile:
@@ -139,6 +145,7 @@ def _write_operation_index(
                 "operation_id": operation_id,
                 "progress_path": str(progress_path),
                 "cancel_path": str(cancel_path),
+                "server_instance_id": _SERVER_INSTANCE_ID,
             },
             indent=2,
             sort_keys=True,
@@ -148,50 +155,249 @@ def _write_operation_index(
     tmp.replace(path)
 
 
-def _read_operation_index(root: Path, operation_id: str) -> JsonDict:
+def _read_operation_index(
+    root: Path,
+    operation_id: str,
+    *,
+    error_code: str = "workspace_operation_not_found",
+    label: str = "workspace bundle operation",
+) -> JsonDict:
     if not re.fullmatch(r"[a-f0-9]{32}", operation_id):
-        raise WorkspaceBundleError("workspace_operation_not_found", "Invalid operation ID")
+        raise WorkspaceBundleError(error_code, "Invalid operation ID")
     path = operation_index_path(root, operation_id)
     if not path.exists():
         raise WorkspaceBundleError(
-            "workspace_operation_not_found",
-            f"No workspace bundle operation found for {operation_id}",
+            error_code,
+            f"No {label} found for {operation_id}",
         )
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _indexed_path(
+    root: Path,
+    index: JsonDict,
+    key: str,
+    *,
+    error_code: str = "workspace_operation_index_invalid",
+    label: str = "Workspace operation",
+) -> Path:
+    raw = index.get(key)
+    if not isinstance(raw, str):
+        raise WorkspaceBundleError(
+            error_code,
+            f"{label} index omitted {key}",
+        )
+    path = Path(raw)
+    root_resolved = root.resolve()
+    path_resolved = path.resolve(strict=False)
+    if path_resolved == root_resolved or root_resolved not in path_resolved.parents:
+        raise WorkspaceBundleError(
+            error_code,
+            f"{label} index has an unsafe {key}",
+        )
+    return path
+
+
+def _start_operation_thread(operation_id: str, thread: threading.Thread) -> None:
+    with _ACTIVE_OPERATIONS_LOCK:
+        _ACTIVE_OPERATIONS[operation_id] = thread
+    try:
+        thread.start()
+    except Exception:
+        with _ACTIVE_OPERATIONS_LOCK:
+            _ACTIVE_OPERATIONS.pop(operation_id, None)
+        raise
+
+
+def _operation_was_interrupted(operation_id: str, index: JsonDict) -> bool:
+    instance_id = index.get("server_instance_id")
+    if instance_id is None:
+        return False
+    if instance_id != _SERVER_INSTANCE_ID:
+        return True
+    with _ACTIVE_OPERATIONS_LOCK:
+        thread = _ACTIVE_OPERATIONS.get(operation_id)
+    return thread is None or not thread.is_alive()
+
+
+def _forget_operation_thread(operation_id: str) -> None:
+    with _ACTIVE_OPERATIONS_LOCK:
+        _ACTIVE_OPERATIONS.pop(operation_id, None)
+
+
+def _recover_interrupted_operation(root: Path, data: JsonDict, progress_path: Path) -> JsonDict:
+    cleanup_paths: list[Path] = []
+    for key in ("archive_path", "workspace_dir", "target_path", "console_log_path"):
+        raw = data.get(key)
+        if not isinstance(raw, str):
+            continue
+        path = Path(raw)
+        path_resolved = path.resolve(strict=False)
+        root_resolved = root.resolve()
+        if path_resolved != root_resolved and root_resolved in path_resolved.parents:
+            cleanup_paths.append(_partial_path(path))
+            if key == "archive_path":
+                cleanup_paths.append(path)
+    _cleanup_partial(*cleanup_paths)
+
+    data["status"] = "failed"
+    data["phase"] = "failed"
+    data["error"] = {
+        "code": "workspace_operation_interrupted",
+        "message": "Workspace operation stopped when its MCP server process exited",
+    }
+    data["interrupted_at"] = _timestamp()
+    data["updated_at"] = data["interrupted_at"]
+    tmp = progress_path.with_name(f"{progress_path.name}.tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(progress_path)
+    return data
+
+
+def _refresh_or_recover_interrupted_operation(
+    root: Path,
+    operation_id: str,
+    index: JsonDict,
+    data: JsonDict,
+    progress_path: Path,
+) -> JsonDict:
+    if data.get("status") != "running" or not _operation_was_interrupted(operation_id, index):
+        return data
+    refreshed = json.loads(progress_path.read_text(encoding="utf-8"))
+    if refreshed.get("status") != "running":
+        return refreshed
+    return _recover_interrupted_operation(root, refreshed, progress_path)
 
 
 def read_workspace_bundle_status(operation_id: str) -> JsonDict:
     config = JenkinsConfig.from_env()
     root = config.require_workspace_download()
     index = _read_operation_index(root, operation_id)
-    progress_path = Path(index["progress_path"])
+    progress_path = _indexed_path(root, index, "progress_path")
     if not progress_path.exists():
         raise WorkspaceBundleError(
             "workspace_progress_not_found",
             f"Progress file is missing for operation {operation_id}",
         )
-    return json.loads(progress_path.read_text(encoding="utf-8"))
+    data = json.loads(progress_path.read_text(encoding="utf-8"))
+    return _refresh_or_recover_interrupted_operation(
+        root,
+        operation_id,
+        index,
+        data,
+        progress_path,
+    )
 
 
 def cancel_workspace_bundle(operation_id: str) -> JsonDict:
     config = JenkinsConfig.from_env()
     root = config.require_workspace_download()
     index = _read_operation_index(root, operation_id)
-    cancel_path = Path(index["cancel_path"])
+    cancel_path = _indexed_path(root, index, "cancel_path")
     cancel_path.write_text(_timestamp() + "\n", encoding="utf-8")
 
-    progress_path = Path(index["progress_path"])
+    progress_path = _indexed_path(root, index, "progress_path")
     if progress_path.exists():
         data = json.loads(progress_path.read_text(encoding="utf-8"))
         if data.get("status") == "running":
             data["cancel_requested"] = True
             data["updated_at"] = _timestamp()
-            progress_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+            tmp = progress_path.with_name(f"{progress_path.name}.tmp")
+            tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+            tmp.replace(progress_path)
 
     return {
         "operation_id": operation_id,
         "cancel_requested": True,
         "progress_path": str(progress_path),
+    }
+
+
+def cleanup_workspace_bundle_operations(
+    older_than_days: int = 30,
+    max_operations: int = 100,
+) -> JsonDict:
+    if older_than_days < 1:
+        raise ToolInputError("older_than_days must be >= 1")
+    if not 1 <= max_operations <= 1_000:
+        raise ToolInputError("max_operations must be between 1 and 1000")
+
+    config = JenkinsConfig.from_env()
+    root = config.require_workspace_download()
+    index_dir = operation_index_dir(root)
+    cutoff = time.time() - older_than_days * 24 * 60 * 60
+    deleted: list[str] = []
+    invalid: list[str] = []
+    inspected_count = 0
+    skipped_running = 0
+    skipped_recent = 0
+    skipped_invalid = 0
+    skipped_non_workspace = 0
+
+    for index_path in (sorted(index_dir.glob("*.json")) if index_dir.exists() else []):
+        if inspected_count >= max_operations:
+            break
+        inspected_count += 1
+        operation_id = index_path.stem
+        try:
+            index = _read_operation_index(root, operation_id)
+            progress_path = _indexed_path(root, index, "progress_path")
+            data = json.loads(progress_path.read_text(encoding="utf-8"))
+            if data.get("operation") not in WORKSPACE_OPERATION_TYPES:
+                skipped_non_workspace += 1
+                continue
+            data = _refresh_or_recover_interrupted_operation(
+                root,
+                operation_id,
+                index,
+                data,
+                progress_path,
+            )
+            if data.get("status") not in TERMINAL_OPERATION_STATUSES:
+                skipped_running += 1
+                continue
+            if progress_path.stat().st_mtime > cutoff:
+                skipped_recent += 1
+                continue
+
+            raw_output_dir = data.get("output_dir")
+            if not isinstance(raw_output_dir, str):
+                raise WorkspaceBundleError(
+                    "workspace_operation_index_invalid",
+                    "Workspace progress omitted output_dir",
+                )
+            output_dir = Path(raw_output_dir)
+            root_resolved = root.resolve()
+            output_resolved = output_dir.resolve(strict=False)
+            if output_resolved == root_resolved or root_resolved not in output_resolved.parents:
+                raise WorkspaceBundleError(
+                    "workspace_operation_index_invalid",
+                    "Workspace progress has an unsafe output_dir",
+                )
+
+            if output_dir.is_symlink():
+                output_dir.unlink()
+            elif output_dir.exists():
+                shutil.rmtree(output_dir)
+            index_path.unlink(missing_ok=True)
+            with _ACTIVE_OPERATIONS_LOCK:
+                _ACTIVE_OPERATIONS.pop(operation_id, None)
+            deleted.append(operation_id)
+        except (OSError, json.JSONDecodeError, WorkspaceBundleError):
+            skipped_invalid += 1
+            invalid.append(operation_id)
+
+    return {
+        "deleted_operation_ids": deleted,
+        "deleted_count": len(deleted),
+        "invalid_operation_ids": invalid,
+        "inspected_count": inspected_count,
+        "skipped_running": skipped_running,
+        "skipped_recent": skipped_recent,
+        "skipped_invalid": skipped_invalid,
+        "skipped_non_workspace": skipped_non_workspace,
+        "older_than_days": older_than_days,
+        "max_operations": max_operations,
     }
 
 
@@ -231,6 +437,7 @@ def start_workspace_bundle_download(
         progress_path,
         {
             "operation_id": operation_id,
+            "operation": "workspace_bundle",
             "status": "running",
             "phase": "queued",
             "job": job,
@@ -269,7 +476,7 @@ def start_workspace_bundle_download(
             "cancel_path": cancel_path,
         },
     )
-    thread.start()
+    _start_operation_thread(operation_id, thread)
 
     return {
         "operation_id": operation_id,
@@ -372,7 +579,7 @@ def start_workspace_path_download(
             "cancel_path": cancel_path,
         },
     )
-    thread.start()
+    _start_operation_thread(operation_id, thread)
 
     return {
         "operation_id": operation_id,
@@ -514,6 +721,8 @@ def _run_workspace_bundle(
             phase="failed",
             error=_error_payload(exc, str(progress.data.get("phase", ""))),
         )
+    finally:
+        _forget_operation_thread(str(progress.data["operation_id"]))
 
 
 def _run_workspace_path_download(
@@ -631,6 +840,8 @@ def _run_workspace_path_download(
             phase="failed",
             error=_error_payload(exc, str(progress.data.get("phase", ""))),
         )
+    finally:
+        _forget_operation_thread(str(progress.data["operation_id"]))
 
 
 def _download_with_progress(
@@ -706,6 +917,15 @@ def _extract_zip_safely(
         with zipfile.ZipFile(archive_path) as archive:
             members = archive.infolist()
             total_files = sum(1 for member in members if not member.is_dir())
+            total_bytes = sum(member.file_size for member in members if not member.is_dir())
+            if total_files > max_files:
+                raise WorkspaceBundleError(
+                    "workspace_extract_file_limit_exceeded",
+                    f"Workspace archive contains more than {max_files} files",
+                )
+            if total_bytes > max_bytes:
+                raise ResponseTooLargeError(max_bytes)
+            ensure_free_space(partial_dir, total_bytes)
             for member in members:
                 _raise_if_cancelled(cancel_check)
                 target = _safe_zip_target(partial_dir, member, seen)
@@ -713,18 +933,12 @@ def _extract_zip_safely(
                     target.mkdir(parents=True, exist_ok=True)
                     continue
 
-                if files_extracted + 1 > max_files:
-                    raise WorkspaceBundleError(
-                        "workspace_extract_file_limit_exceeded",
-                        f"Workspace archive contains more than {max_files} files",
-                    )
-                if extracted_bytes + member.file_size > max_bytes:
-                    raise ResponseTooLargeError(max_bytes)
-
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as src, target.open("xb") as dst:
                     while chunk := src.read(1024 * 1024):
                         _raise_if_cancelled(cancel_check)
+                        if extracted_bytes + len(chunk) > max_bytes:
+                            raise ResponseTooLargeError(max_bytes)
                         dst.write(chunk)
                         extracted_bytes += len(chunk)
 
