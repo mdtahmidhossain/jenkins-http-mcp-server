@@ -174,6 +174,10 @@ python -m compileall src
 ruff check
 ```
 
+`python -m pytest` reports missing lines in the terminal and writes `coverage.xml`.
+GitHub Actions also publishes the coverage table in the workflow run summary. Coverage is
+reported but is not currently enforced by a minimum threshold.
+
 Optional integration tests only run when all are set:
 
 ```bash

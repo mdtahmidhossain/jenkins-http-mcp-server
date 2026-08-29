@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3",
+  "pytest-cov>=7.1.0",
   "ruff>=0.14",
 ]
 
@@ -37,4 +38,4 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --cov=jenkins_mcp_server --cov-report=term-missing --cov-report=xml"

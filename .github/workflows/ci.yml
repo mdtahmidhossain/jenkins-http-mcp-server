@@ -37,5 +37,5 @@ jobs:
       - name: Compile
         run: python -m compileall src
 
-      - name: Test
-        run: python -m pytest
+      - name: Test with coverage
+        run: python -m pytest --cov-report="markdown-append:${GITHUB_STEP_SUMMARY}"
