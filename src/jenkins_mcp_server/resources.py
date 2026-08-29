@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 
-def register_resources(mcp: FastMCP) -> None:
+def register_resources(mcp: MCPServer) -> None:
     @mcp.resource("jenkins-mcp://safety")
     def safety() -> str:
         return (

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from .client import JenkinsClient, append_api_json, job_path, normalize_relative_path, safe_segment
 from .config import JenkinsConfig
@@ -58,7 +58,7 @@ def _query(tree: str | None = None, depth: int | None = None) -> dict[str, Any]:
     return params
 
 
-def register_tools(mcp: FastMCP) -> None:
+def register_tools(mcp: MCPServer) -> None:
     @mcp.tool()
     def jenkins_whoami() -> dict[str, Any]:
         """Return the authenticated Jenkins identity from /whoAmI/api/json."""

@@ -13,7 +13,7 @@ Use option B only: an external Python MCP server that connects to Jenkins throug
 
 ## Transport
 
-STDIO is implemented first using the official MCP Python SDK `FastMCP`.
+STDIO is implemented first using the official MCP Python SDK v2 `MCPServer`.
 
 HTTP transport was not added because STDIO is the requested first target for Codex CLI and Gemini CLI. The SDK supports streamable HTTP, so it can be added later as a small launcher option if needed.
 

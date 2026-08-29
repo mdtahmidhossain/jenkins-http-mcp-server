@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from .resources import register_resources
 from .tools import register_tools
 
 
-def build_server() -> FastMCP:
-    mcp = FastMCP(
+def build_server() -> MCPServer:
+    mcp = MCPServer(
         "jenkins-mcp-server",
         instructions=(
             "External Jenkins 2.563 MCP server using normal Jenkins HTTP APIs. "

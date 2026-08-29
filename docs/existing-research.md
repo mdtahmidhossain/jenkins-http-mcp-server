@@ -2,6 +2,8 @@
 
 Date checked: 2026-05-06
 
+MCP Python SDK rows refreshed: 2026-08-30.
+
 Web was used only to verify current public docs and examples. No third-party code was copied.
 
 | Name | URL | Official vs third-party | Relevance | Reused, referenced, or ignored |
@@ -11,8 +13,9 @@ Web was used only to verify current public docs and examples. No third-party cod
 | Jenkins CSRF Protection | https://www.jenkins.io/doc/book/security/csrf-protection/ | Official Jenkins docs | Confirms crumb concepts and Jenkins 2.222+ applicability; Jenkins 2.563 removes old IP crumb option. | Referenced |
 | Jenkins API security recommendations | https://www.jenkins.io/doc/developer/security/misc/ | Official Jenkins docs | Confirms API-token Basic auth requests generally do not need CSRF crumbs since Jenkins 2.96. | Referenced |
 | Jenkins JUnit plugin | https://plugins.jenkins.io/junit | Official Jenkins plugin site | Confirms test reports are plugin-provided and JUnit was split from core. | Referenced; `jenkins_get_test_report` is marked plugin-dependent |
-| MCP Python SDK | https://github.com/modelcontextprotocol/python-sdk | Official MCP SDK | Confirms official Python SDK, FastMCP, tools/resources, stdio and HTTP transport support. | Reused as dependency |
-| PyPI package metadata for `mcp` | local `pip download --no-deps 'mcp[cli]'` metadata | Official package metadata via PyPI | Confirmed `mcp 1.27.0` has `Requires-Python: >=3.10`, compatible with Python 3.14. | Referenced |
+| MCP Python SDK | https://github.com/modelcontextprotocol/python-sdk | Official MCP SDK | Confirms official Python SDK v2, `MCPServer`, tools/resources, stdio and HTTP transport support. | Reused as dependency |
+| MCP Python SDK migration guide | https://py.sdk.modelcontextprotocol.io/migration/ | Official MCP SDK docs | Confirms v2 renamed `FastMCP` to `MCPServer` and removed `mcp.server.fastmcp`. | Referenced |
+| PyPI package metadata for `mcp` | https://pypi.org/pypi/mcp/json | Official package metadata via PyPI | Confirmed latest `mcp` is `2.1.1` and has `Requires-Python: >=3.10`, compatible with Python 3.14. | Referenced |
 | OpenAI Codex config reference | https://developers.openai.com/codex/config-reference | Official OpenAI docs | Used for current Codex configuration source. | Referenced |
 | OpenAI Codex CLI local help | `codex mcp --help`, `codex mcp add --help` | Installed official CLI help | Confirmed `codex mcp add <NAME> -- <COMMAND>...` and `--env KEY=VALUE` for stdio servers. | Referenced |
 | OpenAI Skills catalog | https://github.com/openai/skills | Official OpenAI repository | Confirms Agent Skills are `SKILL.md` folders of instructions, scripts, and resources. | Referenced |
