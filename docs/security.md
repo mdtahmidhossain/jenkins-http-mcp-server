@@ -9,7 +9,7 @@
 
 ## CSRF Crumbs
 
-Jenkins 2.563 can require crumbs for POST requests. The client tries to fetch `/crumbIssuer/api/json` for POST requests and adds the returned crumb header when available. If Jenkins returns a crumb-related 403, the client refreshes the crumb and retries once.
+Jenkins can require crumbs for POST requests. The client tries to fetch `/crumbIssuer/api/json` for POST requests and adds the returned crumb header when available. If Jenkins returns a crumb-related 403, the client refreshes the crumb and retries once.
 
 Official Jenkins security guidance says Basic auth with API token is generally crumb-exempt since Jenkins 2.96, but crumb support remains implemented for controllers that require it or have custom behavior.
 

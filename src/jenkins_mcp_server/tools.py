@@ -124,7 +124,7 @@ def register_tools(mcp: MCPServer) -> None:
 
     @mcp.tool()
     def jenkins_get_job_config(job: str | list[str]) -> dict[str, Any]:
-        """Read job config.xml. Jenkins may redact secrets without Configure permission."""
+        """Read serialized job config.xml; secrets may be redacted without Configure permission."""
         return _run(lambda: _get_text(f"{job_path(job)}/config.xml"))
 
     @mcp.tool()
@@ -326,7 +326,7 @@ def register_tools(mcp: MCPServer) -> None:
 
     @mcp.tool()
     def jenkins_update_job_config(job: str | list[str], config_xml: str) -> dict[str, Any]:
-        """Replace job config.xml. Requires write and job-config flags."""
+        """Replace job config.xml; Jenkins reserializes it. Requires job-config write gates."""
 
         def op() -> dict[str, Any]:
             config = JenkinsConfig.from_env()

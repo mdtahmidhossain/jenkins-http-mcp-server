@@ -91,7 +91,7 @@ def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.Monke
             return httpx.Response(
                 200,
                 json={"mode": "NORMAL"},
-                headers={"X-Jenkins": "2.563", "X-Jenkins-Session": "session"},
+                headers={"X-Jenkins": "test-version", "X-Jenkins-Session": "session"},
             )
 
     client = FakeReadClient()
@@ -100,12 +100,12 @@ def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.Monke
 
     assert _tool_fn(server, "jenkins_whoami")()["ok"] is True
     assert _tool_fn(server, "jenkins_version")()["data"] == {
-        "version": "2.563",
+        "version": "test-version",
         "session": "session",
     }
     assert _tool_fn(server, "jenkins_health")()["data"] == {
         "mode": "NORMAL",
-        "version": "2.563",
+        "version": "test-version",
     }
     assert _tool_fn(server, "jenkins_get_json")("queue?depth=1", {"tree": "items[id]"})[
         "ok"

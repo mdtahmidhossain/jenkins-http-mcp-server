@@ -9,7 +9,7 @@ Maintain the MCP server with source evidence and conservative permissions.
 
 ## Rules
 
-1. Add no Jenkins feature without Jenkins 2.563 source evidence or official Jenkins documentation.
+1. Add no Jenkins feature without evidence from the exact Jenkins tag recorded in `docs/source-truth.md` or official Jenkins documentation.
 2. Update `docs/tool-evidence.md` for every tool addition or endpoint change.
 3. Add mocked unit tests for every tool and safety behavior. Normal tests must not require a live Jenkins server.
 4. Preserve safety gates. Do not broaden writes, job config writes, deletes, or dangerous/admin-like behavior silently.
@@ -21,7 +21,7 @@ Maintain the MCP server with source evidence and conservative permissions.
 
 ## Change Process
 
-1. Inspect `vendor/jenkins` at the checked-out `jenkins-2.563` tag.
+1. Inspect `vendor/jenkins` at the exact tag recorded in `docs/source-truth.md`; verify the tag and commit before relying on it.
 2. Cite source paths and line numbers in docs.
 3. Implement with structured errors and bounded responses.
 4. Add tests for config, path validation, permission gates, HTTP errors, response limits, and tool registration.

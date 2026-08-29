@@ -1,6 +1,6 @@
 ---
 name: jenkins-source-researcher
-description: Use this skill when researching Jenkins 2.563 source for HTTP endpoints, permissions, or MCP server maintenance evidence.
+description: Use this skill when researching the project's validated Jenkins source for HTTP endpoints, permissions, or MCP server maintenance evidence.
 ---
 
 # Jenkins Source Researcher
@@ -9,8 +9,8 @@ Research Jenkins behavior from the checked-out source, not memory.
 
 ## Source
 
-- Use `vendor/jenkins`, checked out at tag `jenkins-2.563`.
-- Verify with `git describe --tags --exact-match` and `git rev-parse HEAD` if needed.
+- Read `docs/source-truth.md`, then use `vendor/jenkins` at the exact tag and commit recorded there.
+- Verify with `git describe --tags --exact-match` and `git rev-parse HEAD` before relying on the checkout.
 - Cite file paths and line numbers in findings.
 
 ## Search Patterns

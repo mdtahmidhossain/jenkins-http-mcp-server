@@ -1,6 +1,9 @@
 # Jenkins MCP Server
 
-External Python MCP server for Jenkins 2.563. It connects through normal Jenkins HTTP APIs using the permissions available to `JENKINS_USER` and `JENKINS_API_TOKEN`.
+[![CI](https://github.com/mdtahmidhossain/jenkins-http-mcp-server/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/mdtahmidhossain/jenkins-http-mcp-server/actions/workflows/ci.yml)
+[![Coverage: 100%](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/mdtahmidhossain/jenkins-http-mcp-server/actions/workflows/ci.yml)
+
+External Python MCP server source-validated against Jenkins 2.579. It connects through normal Jenkins HTTP APIs using the permissions available to `JENKINS_USER` and `JENKINS_API_TOKEN`.
 
 It does not require Jenkins administrator access, does not install Jenkins plugins, and does not depend on the official Jenkins MCP Server Plugin.
 
@@ -160,6 +163,9 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 - No global config changes.
 - No user management.
 - `jenkins_get_test_report` depends on a test-report plugin such as JUnit exposing `testReport`; it fails clearly if absent.
+- Jenkins 2.574 stopped bundling JUnit. Controllers that do not already have the JUnit plugin may not expose `testReport`.
+- Jenkins 2.579 removed Apache Commons Lang 2 from core. Update installed plugins before upgrading Jenkins because outdated plugins that relied on the core-provided library may fail to load.
+- Jenkins 2.579 reserializes job configuration for `GET config.xml` and after `POST config.xml`. Config XML formatting, comments, and element ordering are not guaranteed to round-trip byte-for-byte.
 - Nested folder paths are URL-encoded as repeated `job/<segment>` path components. Controllers without the needed folder/job type return Jenkins 404s.
 - Workspace downloads use Jenkins' job-level workspace endpoint. The saved console log is build-run-specific, but the workspace is the current/some available job workspace and may not be an immutable snapshot of that build.
 - Workspace operations stream to disk and report status/progress through `jenkins_get_workspace_bundle_status`; large downloads can still stress Jenkins controllers or agents.

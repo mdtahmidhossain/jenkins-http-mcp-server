@@ -8,7 +8,7 @@ Use option B only: an external Python MCP server that connects to Jenkins throug
 
 - The user does not have Jenkins administrator permission.
 - The server must not require Jenkins plugin installation.
-- Jenkins 2.563 core and official docs expose the needed HTTP endpoints through normal Remote Access API and Stapler web methods.
+- Jenkins 2.579 core and official docs expose the needed HTTP endpoints through normal Remote Access API and Stapler web methods.
 - The official Jenkins MCP Server Plugin is not usable here because it requires installation/enabling inside Jenkins.
 
 ## Transport
@@ -34,4 +34,4 @@ Workspace bundle downloads run asynchronously. `jenkins_start_workspace_bundle_d
 
 ## Source of Truth
 
-Endpoint behavior is based on Jenkins 2.563 source under `vendor/jenkins` and official Jenkins documentation. Plugin-dependent behavior is marked explicitly.
+Endpoint behavior is based on Jenkins 2.579 source under `vendor/jenkins` and official Jenkins documentation. Plugin-dependent behavior is marked explicitly.

@@ -71,7 +71,7 @@ def test_get_json_adds_api_and_auth() -> None:
         seen.append(request)
         assert request.url.path == "/job/demo/api/json"
         assert request.headers["authorization"].startswith("Basic ")
-        return httpx.Response(200, json={"name": "demo"}, headers={"X-Jenkins": "2.563"})
+        return httpx.Response(200, json={"name": "demo"}, headers={"X-Jenkins": "test-version"})
 
     client = JenkinsClient(config(), transport=httpx.MockTransport(handler))
     assert client.get_json("job/demo") == {"name": "demo"}

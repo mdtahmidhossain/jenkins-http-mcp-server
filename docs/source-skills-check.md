@@ -1,8 +1,8 @@
 # Jenkins Source Skills Check
 
-Date checked: 2026-05-06
+Date checked: 2026-08-30
 
-Commands were run inside `vendor/jenkins` at tag `jenkins-2.563`.
+Commands were run inside `vendor/jenkins` at tag `jenkins-2.579`, commit `9095ea3a5c5e7dcd392695a5dd880af1c9910ddf`.
 
 ## Commands and Results
 
@@ -14,7 +14,7 @@ Result: no output.
 
 Result: no output.
 
-`find . \( -path '*skills*' -o -path '*Skills*' \)`
+`find . -path '*skills*' -o -path '*Skills*'`
 
 Result: no output.
 
@@ -28,4 +28,4 @@ Result: no relevant agent skills, Codex, Gemini CLI, or MCP instructions were fo
 
 ## Conclusion
 
-Jenkins 2.563 source did not contain relevant `SKILL.md`, `AGENTS.md`, `.agents`, `.gemini`, Codex, Gemini CLI, or MCP agent-skill guidance. New project-local skills were created under `.agents/skills/`.
+Jenkins 2.579 source did not contain relevant `SKILL.md`, `AGENTS.md`, `.agents`, `.gemini`, Codex, Gemini CLI, or MCP agent-skill guidance. The project-local skills under `.agents/skills/` remain necessary.

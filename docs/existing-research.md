@@ -1,8 +1,8 @@
 # Existing Research
 
-Date checked: 2026-05-06
+Original survey date: 2026-05-06.
 
-MCP Python SDK rows refreshed: 2026-08-30.
+Jenkins 2.579 release and MCP Python SDK rows refreshed: 2026-08-30.
 
 Web was used only to verify current public docs and examples. No third-party code was copied.
 
@@ -10,9 +10,12 @@ Web was used only to verify current public docs and examples. No third-party cod
 | --- | --- | --- | --- | --- |
 | Jenkins Remote Access API | https://www.jenkins.io/doc/book/using/remote-access-api/ | Official Jenkins docs | Confirms `.../api/`, JSON API, build trigger endpoints, nested job URL example, depth/tree behavior, and `X-Jenkins` version header. | Referenced |
 | Jenkins Authenticating scripted clients | https://www.jenkins.io/doc/book/system-administration/authenticating-scripted-clients/ | Official Jenkins docs | Confirms Basic auth with username and API token, preemptive auth behavior, and example crumb usage for scripted clients. | Referenced |
-| Jenkins CSRF Protection | https://www.jenkins.io/doc/book/security/csrf-protection/ | Official Jenkins docs | Confirms crumb concepts and Jenkins 2.222+ applicability; Jenkins 2.563 removes old IP crumb option. | Referenced |
+| Jenkins CSRF Protection | https://www.jenkins.io/doc/book/security/csrf-protection/ | Official Jenkins docs | Confirms current crumb concepts, Jenkins 2.222+ applicability, API-token exemption, and removal of the old proxy-compatibility option in Jenkins 2.543. | Referenced |
 | Jenkins API security recommendations | https://www.jenkins.io/doc/developer/security/misc/ | Official Jenkins docs | Confirms API-token Basic auth requests generally do not need CSRF crumbs since Jenkins 2.96. | Referenced |
 | Jenkins JUnit plugin | https://plugins.jenkins.io/junit | Official Jenkins plugin site | Confirms test reports are plugin-provided and JUnit was split from core. | Referenced; `jenkins_get_test_report` is marked plugin-dependent |
+| Jenkins 2.579 changelog | https://www.jenkins.io/changelog/2.579/ | Official Jenkins docs | Confirms Apache Commons Lang 2 was removed from core and installed plugins should be updated before upgrading Jenkins. | Referenced for the 2.579 compatibility review |
+| Jenkins security advisory 2026-06-10 | https://www.jenkins.io/security/advisory/2026-06-10/ | Official Jenkins docs | Confirms the 2.568 job `config.xml` serialization and queue permission fixes included in 2.579. | Referenced for changed endpoint semantics |
+| Jenkins security advisory 2026-08-05 | https://www.jenkins.io/security/advisory/2026-08-05/ | Official Jenkins docs | Confirms security fixes included in Jenkins 2.576 and therefore 2.579. | Referenced for upgrade research; no MCP route change required |
 | MCP Python SDK | https://github.com/modelcontextprotocol/python-sdk | Official MCP SDK | Confirms official Python SDK v2, `MCPServer`, tools/resources, stdio and HTTP transport support. | Reused as dependency |
 | MCP Python SDK migration guide | https://py.sdk.modelcontextprotocol.io/migration/ | Official MCP SDK docs | Confirms v2 renamed `FastMCP` to `MCPServer` and removed `mcp.server.fastmcp`. | Referenced |
 | PyPI package metadata for `mcp` | https://pypi.org/pypi/mcp/json | Official package metadata via PyPI | Confirmed latest `mcp` is `2.1.1` and has `Requires-Python: >=3.10`, compatible with Python 3.14. | Referenced |
@@ -39,4 +42,4 @@ Found existing Jenkins MCP servers:
 - PulseMCP Jenkins MCP Server listing
 - ALMC Jenkins MCP Server listing
 
-No Jenkins 2.563 source-bundled Agent Skills were found. Public searches found general Agent Skills repositories and CI/CD mentions, but no source-of-truth Jenkins 2.563 skill suitable to reuse.
+No Jenkins 2.579 source-bundled Agent Skills were found. Public searches found general Agent Skills repositories and CI/CD mentions, but no source-of-truth Jenkins 2.579 skill suitable to reuse.

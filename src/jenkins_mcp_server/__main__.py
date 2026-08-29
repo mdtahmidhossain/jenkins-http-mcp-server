@@ -10,7 +10,7 @@ def build_server() -> MCPServer:
     mcp = MCPServer(
         "jenkins-mcp-server",
         instructions=(
-            "External Jenkins 2.563 MCP server using normal Jenkins HTTP APIs. "
+            "External Jenkins MCP server using normal Jenkins HTTP APIs. "
             "Read-only by default; write tools are gated by environment flags."
         ),
     )
