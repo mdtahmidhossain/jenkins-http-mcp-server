@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -7,12 +9,19 @@ import pytest
 
 from jenkins_mcp_server.client import (
     JenkinsClient,
+    _body_snippet,
     append_api_json,
     job_path,
     normalize_relative_path,
+    safe_segment,
 )
 from jenkins_mcp_server.config import JenkinsConfig
-from jenkins_mcp_server.errors import JenkinsHTTPError, PathValidationError, ResponseTooLargeError
+from jenkins_mcp_server.errors import (
+    JenkinsHTTPError,
+    OperationCancelledError,
+    PathValidationError,
+    ResponseTooLargeError,
+)
 
 
 def config(**overrides: Any) -> JenkinsConfig:
@@ -173,3 +182,134 @@ def test_crumb_retry_after_403() -> None:
         "/crumbIssuer/api/json",
         "/job/demo/build",
     ]
+
+
+@pytest.mark.parametrize("path", ["", "///path", "/", "./"])
+def test_normalize_relative_path_rejects_empty_forms(path: str) -> None:
+    with pytest.raises(PathValidationError):
+        normalize_relative_path(path)
+
+
+def test_path_segment_helpers_reject_empty_values() -> None:
+    with pytest.raises(PathValidationError):
+        job_path("")
+    with pytest.raises(PathValidationError):
+        safe_segment("", "value")
+
+
+def test_client_from_env_context_manager_closes_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JENKINS_URL", "https://jenkins.example.com/")
+    monkeypatch.delenv("JENKINS_USER", raising=False)
+    monkeypatch.delenv("JENKINS_API_TOKEN", raising=False)
+
+    with JenkinsClient.from_env() as client:
+        assert not client.http.is_closed
+
+    assert client.http.is_closed
+
+
+def test_empty_body_snippet_and_invalid_internal_method() -> None:
+    assert _body_snippet(httpx.Response(204)) is None
+    transport = httpx.MockTransport(lambda request: httpx.Response(200))
+    client = JenkinsClient(config(), transport=transport)
+    try:
+        with pytest.raises(PathValidationError, match="Only GET and POST"):
+            client.request("DELETE", "api/json")
+    finally:
+        client.close()
+
+
+def test_post_continues_when_crumb_issuer_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/crumbIssuer/api/json":
+            return httpx.Response(500, text="crumb issuer unavailable")
+        return httpx.Response(201)
+
+    with JenkinsClient(config(), transport=httpx.MockTransport(handler)) as client:
+        assert client.post("job/demo/build")["status_code"] == 201
+
+
+def test_invalid_json_and_successful_text_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/json"):
+            return httpx.Response(200, text="not-json")
+        return httpx.Response(200, text="plain text")
+
+    with JenkinsClient(config(), transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(JenkinsHTTPError, match="Response was not JSON"):
+            client.get_json("job/demo")
+        assert client.get_text("job/demo/config.xml") == "plain text"
+
+
+def test_streamed_text_reads_error_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="missing")
+
+    with (
+        JenkinsClient(config(), transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(JenkinsHTTPError) as exc_info,
+    ):
+        client.get_text_limited("job/demo/1/consoleText", limit=10)
+
+    assert exc_info.value.body == "missing"
+
+
+def test_streamed_text_handles_multiple_chunks_at_exact_limit() -> None:
+    class ChunkStream(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            yield b"abc"
+            yield b"de"
+            yield b"f"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=ChunkStream())
+
+    with JenkinsClient(config(), transport=httpx.MockTransport(handler)) as client:
+        result = client.get_text_limited("job/demo/1/consoleText", limit=5)
+
+    assert result == {"text": "abcde", "bytes_returned": 5, "truncated": True, "limit": 5}
+
+
+def test_stream_to_file_cancellation_empty_chunk_and_incremental_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    class FakeStreamResponse:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = chunks
+
+        def iter_bytes(self) -> Iterator[bytes]:
+            return iter(self.chunks)
+
+    client = JenkinsClient(config())
+
+    @contextmanager
+    def cancelled_stream(*args: Any, **kwargs: Any) -> Iterator[FakeStreamResponse]:
+        yield FakeStreamResponse([b"x"])
+
+    monkeypatch.setattr(client.http, "stream", cancelled_stream)
+    with pytest.raises(OperationCancelledError):
+        client.stream_to_file(
+            "job/demo/ws/file",
+            tmp_path / "cancelled.partial",
+            max_bytes=10,
+            cancel_check=lambda: True,
+        )
+
+    @contextmanager
+    def oversized_stream(*args: Any, **kwargs: Any) -> Iterator[FakeStreamResponse]:
+        yield FakeStreamResponse([b"", b"abcd"])
+
+    monkeypatch.setattr(client.http, "stream", oversized_stream)
+    with pytest.raises(ResponseTooLargeError):
+        client.stream_to_file(
+            "job/demo/ws/file",
+            tmp_path / "oversized.partial",
+            max_bytes=3,
+        )
+    client.close()

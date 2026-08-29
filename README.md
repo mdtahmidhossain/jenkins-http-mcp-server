@@ -175,8 +175,8 @@ ruff check
 ```
 
 `python -m pytest` reports missing lines in the terminal and writes `coverage.xml`.
-GitHub Actions also publishes the coverage table in the workflow run summary. Coverage is
-reported but is not currently enforced by a minimum threshold.
+GitHub Actions also publishes the coverage table in the workflow run summary. The test command
+enforces 100% source line coverage locally and in CI.
 
 Optional integration tests only run when all are set:
 

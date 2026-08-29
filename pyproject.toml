@@ -38,4 +38,4 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --cov=jenkins_mcp_server --cov-report=term-missing --cov-report=xml"
+addopts = "-q --cov=jenkins_mcp_server --cov-report=term-missing --cov-report=xml --cov-fail-under=100"

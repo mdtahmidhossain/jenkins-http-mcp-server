@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from jenkins_mcp_server.config import JenkinsConfig
+from jenkins_mcp_server.config import JenkinsConfig, _bool_env, _float_env, _int_env
 from jenkins_mcp_server.errors import ConfigError, PermissionGateError
 
 
@@ -81,3 +81,54 @@ def test_dangerous_delete_requires_separate_flag() -> None:
 
     with pytest.raises(PermissionGateError):
         config.require_delete()
+
+
+def test_environment_parser_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEST_BOOL", "maybe")
+    with pytest.raises(ConfigError, match="TEST_BOOL must be a boolean value"):
+        _bool_env("TEST_BOOL", False)
+
+    monkeypatch.setenv("TEST_INT", "not-an-integer")
+    with pytest.raises(ConfigError, match="TEST_INT must be an integer"):
+        _int_env("TEST_INT", 1)
+    monkeypatch.setenv("TEST_INT", "0")
+    with pytest.raises(ConfigError, match="TEST_INT must be >= 1"):
+        _int_env("TEST_INT", 1)
+
+    monkeypatch.setenv("TEST_FLOAT", "not-a-number")
+    with pytest.raises(ConfigError, match="TEST_FLOAT must be a number"):
+        _float_env("TEST_FLOAT", 1.0)
+    monkeypatch.setenv("TEST_FLOAT", "0")
+    with pytest.raises(ConfigError, match="TEST_FLOAT must be >= 0.1"):
+        _float_env("TEST_FLOAT", 1.0)
+
+
+@pytest.mark.parametrize("url", ["", "ftp://jenkins.example.com", "https:///missing-host"])
+def test_config_rejects_missing_or_invalid_url(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    monkeypatch.setenv("JENKINS_URL", url)
+
+    with pytest.raises(ConfigError):
+        JenkinsConfig.from_env()
+
+
+def test_specific_write_and_workspace_directory_gates() -> None:
+    config = JenkinsConfig(
+        url="https://jenkins.example.com/",
+        user="u",
+        api_token="t",
+        enable_writes=True,
+    )
+    with pytest.raises(PermissionGateError, match="JOB_CONFIG_WRITE"):
+        config.require_job_config_write()
+
+    workspace_config = JenkinsConfig(
+        url="https://jenkins.example.com/",
+        user="u",
+        api_token="t",
+        enable_workspace_download=True,
+    )
+    with pytest.raises(PermissionGateError, match="WORKSPACE_DOWNLOAD_DIR"):
+        workspace_config.require_workspace_download()
