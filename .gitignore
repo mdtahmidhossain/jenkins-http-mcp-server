@@ -1,6 +1,8 @@
 vendor/jenkins/
 __pycache__/
 *.py[cod]
+.env
+.DS_Store
 .coverage
 coverage.xml
 build/
