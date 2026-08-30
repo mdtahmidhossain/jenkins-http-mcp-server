@@ -7,6 +7,10 @@ Core Jenkins, MCP SDK, client setup, packaging, and listed-project availability 
 
 Web was used only to verify current public docs and examples. No third-party code was copied.
 
+The PyPI entries below are read-only metadata checks for a dependency and an unrelated third-party
+project. They do not configure package publishing; this repository contains no PyPI publishing
+workflow or instructions.
+
 | Name | URL | Official vs third-party | Relevance | Decision | Date checked |
 | --- | --- | --- | --- | --- | --- |
 | Jenkins Remote Access API | https://www.jenkins.io/doc/book/using/remote-access-api/ | Official Jenkins docs | Confirms `.../api/`, JSON API, build trigger endpoints, nested job URL example, depth/tree behavior, and `X-Jenkins` version header. | Referenced | 2026-08-30 |
