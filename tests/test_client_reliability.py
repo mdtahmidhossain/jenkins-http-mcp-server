@@ -259,6 +259,26 @@ def test_required_crumb_transport_failure_is_structured() -> None:
     assert exc_info.value.path == "crumbIssuer/api/json"
 
 
+def test_required_crumb_http_failure_is_structured() -> None:
+    crumb_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal crumb_calls
+        if request.url.path == "/crumbIssuer/api/json":
+            crumb_calls += 1
+            return httpx.Response(404 if crumb_calls == 1 else 500)
+        return httpx.Response(403, text="No valid crumb was included")
+
+    with (
+        JenkinsClient(_config(), transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(JenkinsHTTPError) as exc_info,
+    ):
+        client.post("job/demo/build")
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.path == "crumbIssuer/api/json"
+
+
 def test_optional_crumb_transport_failure_does_not_block_post() -> None:
     request = httpx.Request("GET", "https://jenkins.example.com/crumbIssuer/api/json")
 

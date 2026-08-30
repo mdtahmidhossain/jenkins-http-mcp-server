@@ -55,12 +55,15 @@ def test_crumb_manager_caches_valid_crumb() -> None:
     assert calls == 1
 
 
-def test_crumb_manager_ignores_incomplete_payload() -> None:
+def test_crumb_manager_rejects_incomplete_payload() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"crumbRequestField": "Jenkins-Crumb"})
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        assert CrumbManager().get(client, "https://jenkins.example.com/") is None
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client, pytest.raises(
+        JenkinsProtocolError,
+        match="omitted a valid crumb",
+    ):
+        CrumbManager().get(client, "https://jenkins.example.com/")
 
 
 def test_crumb_manager_bounds_and_validates_payloads() -> None:

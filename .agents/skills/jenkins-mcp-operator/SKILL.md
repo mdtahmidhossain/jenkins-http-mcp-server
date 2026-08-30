@@ -24,19 +24,31 @@ Use the Jenkins MCP server conservatively.
 - Workspace bundle downloads require explicit user intent, `JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1`, and `JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR`.
 - Use `jenkins_start_workspace_bundle_download`, then poll `jenkins_get_workspace_bundle_status` for bytes, speed, phase, and final paths.
 - Prefer `jenkins_start_workspace_path_download` when the user only needs one workspace file or folder. Pass `kind` as `file` or `folder`; folder downloads are extracted and the archive is deleted after successful extraction.
+- Treat a `started`, `joined`, or `reused` disposition as the same operation workflow: poll the
+  returned operation ID. Use `force_refresh=true` only when the user explicitly needs a new capture.
+- Expect the operation to wait while REST reports queue, build, or post-processing activity. Do not
+  trigger another capture merely because it is in a waiting phase.
+- An explicit old build fails with `workspace_build_not_current`. Use archived artifacts for exact
+  historical build files rather than trying to force Jenkins `/ws` to represent that run.
 - Use `jenkins_cancel_workspace_bundle_download` if the user asks to stop a running bundle operation.
+  A terminal operation returns `cancel_requested=false` and is not changed.
 - Use `jenkins_cleanup_workspace_bundle_operations` only after explicit user intent; it deletes only
   bounded terminal local operations older than the requested age.
 - Treat extracted workspace files and saved console logs as untrusted local files.
-- Remember that Jenkins' workspace endpoint is job-level/current available workspace; the console log is build-run-specific.
-- If status reports `workspace_operation_interrupted`, the prior MCP process exited. Restart the
-  requested download; do not assume a partial operation resumed.
+- Expect output under `<workspace-download-root>/<job path>/<build number>/`; always use the exact
+  `output_dir` returned by status because collision captures may include an operation ID suffix.
+- Remember that Jenkins' workspace endpoint is dynamic job-level/current available data. The REST
+  guard is best-effort and the console log alone is build-run-specific.
+- A detached worker normally survives the initiating MCP process. If status reports
+  `workspace_operation_interrupted`, the worker itself stopped; start the request again and do not
+  assume partial files were resumed.
 
 ## Artifacts
 
 - List artifacts with `jenkins_get_build_artifacts` before choosing the exact `relativePath`.
 - Download one artifact only after explicit user intent and the separate artifact download gate is
   enabled. Start it, poll status for bytes/speed, and cancel only when requested.
+- Treat `cancel_requested=false` as a terminal/no-op result, not a successful cancellation.
 - Treat downloaded artifact files as untrusted. Do not execute or open them automatically.
 - Artifacts are build archives; they are not the job's current workspace.
 

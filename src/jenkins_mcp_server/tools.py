@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from mcp.server import MCPServer
@@ -11,7 +12,7 @@ from .artifact_download import (
 )
 from .client import JenkinsClient, append_api_json, job_path, normalize_relative_path, safe_segment
 from .config import JenkinsConfig
-from .errors import JenkinsMCPError, ToolInputError
+from .errors import JenkinsMCPError, JenkinsProtocolError, ToolInputError
 from .workspace_bundle import (
     cancel_workspace_bundle,
     cleanup_workspace_bundle_operations,
@@ -64,6 +65,13 @@ def _query(tree: str | None = None, depth: int | None = None) -> dict[str, Any]:
     return params
 
 
+def _version_header(response) -> str:
+    version = response.headers.get("X-Jenkins")
+    if not version:
+        raise JenkinsProtocolError("Jenkins API response omitted the X-Jenkins version header")
+    return version
+
+
 def register_tools(mcp: MCPServer) -> None:
     @mcp.tool()
     def jenkins_whoami() -> dict[str, Any]:
@@ -78,7 +86,7 @@ def register_tools(mcp: MCPServer) -> None:
             with _client() as client:
                 response = client.request("GET", "api/json", params={"tree": "mode"})
                 return {
-                    "version": response.headers.get("X-Jenkins"),
+                    "version": _version_header(response),
                     "session": response.headers.get("X-Jenkins-Session"),
                 }
 
@@ -99,8 +107,15 @@ def register_tools(mcp: MCPServer) -> None:
                         )
                     },
                 )
-                payload = response.json()
-                payload["version"] = response.headers.get("X-Jenkins")
+                try:
+                    payload = response.json()
+                except json.JSONDecodeError as exc:
+                    raise JenkinsProtocolError(
+                        "Jenkins health response was not valid JSON"
+                    ) from exc
+                if not isinstance(payload, dict):
+                    raise JenkinsProtocolError("Jenkins health response must be a JSON object")
+                payload["version"] = _version_header(response)
                 return payload
 
         return _run(op)
@@ -429,9 +444,10 @@ def register_tools(mcp: MCPServer) -> None:
     def jenkins_start_workspace_bundle_download(
         job: str | list[str],
         build: int | str = "lastBuild",
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
-        """Start async workspace zip download, extraction, cleanup, and console log save."""
-        return _run(lambda: start_workspace_bundle_download(job, build))
+        """Start or join a guarded workspace capture plus exact build console log."""
+        return _run(lambda: start_workspace_bundle_download(job, build, force_refresh))
 
     @mcp.tool()
     def jenkins_start_workspace_path_download(
@@ -439,9 +455,18 @@ def register_tools(mcp: MCPServer) -> None:
         workspace_path: str,
         kind: str,
         build: int | str = "lastBuild",
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
-        """Start async download of one workspace file or folder plus the build console log."""
-        return _run(lambda: start_workspace_path_download(job, workspace_path, kind, build))
+        """Start or join a guarded workspace file/folder capture plus exact console log."""
+        return _run(
+            lambda: start_workspace_path_download(
+                job,
+                workspace_path,
+                kind,
+                build,
+                force_refresh,
+            )
+        )
 
     @mcp.tool()
     def jenkins_get_workspace_bundle_status(operation_id: str) -> dict[str, Any]:

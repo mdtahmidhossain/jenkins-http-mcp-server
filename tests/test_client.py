@@ -18,6 +18,7 @@ from jenkins_mcp_server.client import (
 from jenkins_mcp_server.config import JenkinsConfig
 from jenkins_mcp_server.errors import (
     JenkinsHTTPError,
+    JenkinsProtocolError,
     OperationCancelledError,
     PathValidationError,
     ResponseTooLargeError,
@@ -41,6 +42,12 @@ def test_normalize_relative_path_rejects_external_urls() -> None:
         normalize_relative_path("https://evil.example/api/json")
     with pytest.raises(PathValidationError):
         normalize_relative_path("//evil.example/api/json")
+    with pytest.raises(PathValidationError):
+        normalize_relative_path("/job/demo/api/json")
+    with pytest.raises(PathValidationError):
+        normalize_relative_path("\\job\\demo")
+    with pytest.raises(PathValidationError):
+        normalize_relative_path("job\\demo")
 
 
 def test_normalize_relative_path_rejects_traversal() -> None:
@@ -48,11 +55,34 @@ def test_normalize_relative_path_rejects_traversal() -> None:
         normalize_relative_path("../api/json")
     with pytest.raises(PathValidationError):
         normalize_relative_path("job/%2e%2e/api/json")
+    with pytest.raises(PathValidationError):
+        normalize_relative_path("job/%252e%252e/api/json")
+    with pytest.raises(PathValidationError):
+        normalize_relative_path("job/%2e%2e%2fscript")
+    with pytest.raises(PathValidationError):
+        normalize_relative_path("job/%2e/api/json")
+    with pytest.raises(PathValidationError):
+        normalize_relative_path("job/demo#fragment")
+    assert normalize_relative_path("job/%zz") == "job/%zz"
 
 
 def test_append_api_json_preserves_query() -> None:
-    assert append_api_json("/job/example?tree=name") == "job/example/api/json?tree=name"
+    assert append_api_json("job/example?tree=name") == "job/example/api/json?tree=name"
     assert append_api_json("job/example/api/json?depth=1") == "job/example/api/json?depth=1"
+
+
+def test_path_requires_a_path_component() -> None:
+    with pytest.raises(PathValidationError, match="path component"):
+        normalize_relative_path("?depth=1")
+
+
+def test_request_merges_path_and_explicit_query_parameters() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params == httpx.QueryParams("tree=name&depth=2")
+        return httpx.Response(200, json={"ok": True})
+
+    with JenkinsClient(config(), transport=httpx.MockTransport(handler)) as client:
+        assert client.get_json("job/demo?tree=name", params={"depth": 2}) == {"ok": True}
 
 
 def test_nested_job_path_encoding() -> None:
@@ -182,6 +212,28 @@ def test_crumb_retry_after_403() -> None:
         "/crumbIssuer/api/json",
         "/job/demo/build",
     ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"crumb": "abc"},
+        {"crumbRequestField": "Jenkins-Crumb"},
+        {"crumbRequestField": 1, "crumb": "abc"},
+        {"crumbRequestField": "Jenkins-Crumb", "crumb": 1},
+    ],
+)
+def test_malformed_crumb_response_fails_when_jenkins_requires_crumb(payload) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/crumbIssuer/api/json":
+            return httpx.Response(200, json=payload)
+        return httpx.Response(403, text="No valid crumb was included")
+
+    with (
+        JenkinsClient(config(), transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(JenkinsProtocolError, match="crumb"),
+    ):
+        client.post("job/demo/build")
 
 
 @pytest.mark.parametrize("path", ["", "///path", "/", "./"])

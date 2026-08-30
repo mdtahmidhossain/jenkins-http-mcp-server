@@ -1,8 +1,9 @@
 # Security Policy
 
-## Supported Version
+## Supported Versions
 
-Security fixes are applied to the latest released version.
+Before the first tagged release, security fixes target the `main` branch. After releases begin,
+security fixes target the latest released version.
 
 ## Reporting a Vulnerability
 

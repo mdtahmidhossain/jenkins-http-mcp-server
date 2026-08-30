@@ -6,6 +6,7 @@ import stat
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,6 +27,7 @@ from jenkins_mcp_server.workspace_bundle import (
     start_workspace_bundle_download,
     start_workspace_path_download,
 )
+from jenkins_mcp_server.workspace_registry import WorkspaceOperationRegistry
 
 
 def _set_workspace_env(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
@@ -43,6 +45,38 @@ def _zip_bytes(entries: dict[str, bytes]) -> bytes:
         for name, content in entries.items():
             archive.writestr(name, content)
     return data.getvalue()
+
+
+def _stable_job_state(build_number: int = 123) -> dict[str, Any]:
+    build = {
+        "number": build_number,
+        "url": f"https://jenkins.example.com/job/my-job/{build_number}/",
+        "queueId": 42,
+        "building": False,
+        "inProgress": False,
+        "result": "SUCCESS",
+    }
+    return {
+        "url": "https://jenkins.example.com/job/my-job/",
+        "inQueue": False,
+        "queueItem": None,
+        "lastBuild": build,
+        "lastCompletedBuild": {"number": build_number},
+        "builds": [build],
+    }
+
+
+def _install_inline_worker(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    def spawn(operation_id: str) -> SimpleNamespace:
+        config = JenkinsConfig.from_env()
+        registry = WorkspaceOperationRegistry(root)
+        owner_id = "inline-worker"
+        row = registry.claim_worker(operation_id, owner_id, 12345)
+        assert row is not None
+        workspace_bundle.run_registered_workspace_operation(config, registry, row, owner_id)
+        return SimpleNamespace(pid=12345)
+
+    monkeypatch.setattr(workspace_bundle, "_spawn_workspace_worker", spawn)
 
 
 def test_workspace_bundle_download_extracts_deletes_archive_and_saves_log(
@@ -65,8 +99,11 @@ def test_workspace_bundle_download_extracts_deletes_archive_and_saves_log(
             return None
 
         def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-            assert path == "job/my-job/lastBuild"
-            return {"number": 123, "url": "https://jenkins.example.com/job/my-job/123/"}
+            if path == "job/my-job":
+                return _stable_job_state()
+            if path == "queue":
+                return {"items": []}
+            raise AssertionError(path)
 
         def stream_to_file(
             self,
@@ -96,11 +133,13 @@ def test_workspace_bundle_download_extracts_deletes_archive_and_saves_log(
             return {"bytes_downloaded": downloaded, "total_bytes": len(payload)}
 
     monkeypatch.setattr(workspace_bundle, "JenkinsClient", FakeClient)
+    _install_inline_worker(monkeypatch, root)
 
     started = start_workspace_bundle_download("my-job", "lastBuild")
     status = _wait_for_status(started["operation_id"])
 
     output_dir = Path(started["output_dir"])
+    assert output_dir == root / "my-job" / "123"
     assert status["status"] == "succeeded"
     assert not (output_dir / "my-job123.zip").exists()
     assert (output_dir / "workspace" / "README.txt").read_text() == "hello"
@@ -131,8 +170,11 @@ def test_workspace_folder_path_download_extracts_under_requested_path(
             return None
 
         def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-            assert path == "job/my-job/lastBuild"
-            return {"number": 123}
+            if path == "job/my-job":
+                return _stable_job_state()
+            if path == "queue":
+                return {"items": []}
+            raise AssertionError(path)
 
         def stream_to_file(
             self,
@@ -156,6 +198,7 @@ def test_workspace_folder_path_download_extracts_under_requested_path(
             return {"bytes_downloaded": len(payload), "total_bytes": len(payload)}
 
     monkeypatch.setattr(workspace_bundle, "JenkinsClient", FakeClient)
+    _install_inline_worker(monkeypatch, root)
 
     started = start_workspace_path_download("my-job", "target/reports", "folder")
     status = _wait_for_status(started["operation_id"])
@@ -191,8 +234,11 @@ def test_workspace_file_path_download_saves_file_and_log(
             return None
 
         def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-            assert path == "job/my-job/lastBuild"
-            return {"number": 123}
+            if path == "job/my-job":
+                return _stable_job_state()
+            if path == "queue":
+                return {"items": []}
+            raise AssertionError(path)
 
         def stream_to_file(
             self,
@@ -216,6 +262,7 @@ def test_workspace_file_path_download_saves_file_and_log(
             return {"bytes_downloaded": len(payload), "total_bytes": len(payload)}
 
     monkeypatch.setattr(workspace_bundle, "JenkinsClient", FakeClient)
+    _install_inline_worker(monkeypatch, root)
 
     started = start_workspace_path_download("my-job", "target/report.html", "file")
     status = _wait_for_status(started["operation_id"])
@@ -247,9 +294,59 @@ def test_workspace_bundle_cancel_writes_cancel_file(
     result = cancel_workspace_bundle(operation_id)
     status = read_workspace_bundle_status(operation_id)
 
+    assert workspace_bundle.operation_index_dir(root).stat().st_mode & 0o777 == 0o700
     assert result["cancel_requested"] is True
     assert cancel_path.exists()
     assert status["cancel_requested"] is True
+
+
+def test_legacy_workspace_cancel_does_not_change_completed_operation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundles"
+    _set_workspace_env(monkeypatch, root)
+    operation_id = "c" * 32
+    output_dir = root / "my-job123"
+    output_dir.mkdir(parents=True)
+    progress_path = output_dir / ".progress.json"
+    cancel_path = output_dir / ".cancel"
+    progress_path.write_text(json.dumps({"status": "succeeded"}), encoding="utf-8")
+    workspace_bundle._write_operation_index(root, operation_id, progress_path, cancel_path)
+
+    result = cancel_workspace_bundle(operation_id)
+
+    assert result["cancel_requested"] is False
+    assert result["status"] == "succeeded"
+    assert not cancel_path.exists()
+
+
+def test_legacy_workspace_cancel_reports_concurrent_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "bundles"
+    _set_workspace_env(monkeypatch, root)
+    operation_id = "d" * 32
+    output_dir = root / "my-job123"
+    output_dir.mkdir(parents=True)
+    progress_path = output_dir / ".progress.json"
+    cancel_path = output_dir / ".cancel"
+    progress_path.write_text(json.dumps({"status": "running"}), encoding="utf-8")
+    workspace_bundle._write_operation_index(root, operation_id, progress_path, cancel_path)
+    original_write_text = Path.write_text
+
+    def complete_then_write_marker(path: Path, *args: Any, **kwargs: Any) -> int:
+        if path == cancel_path:
+            progress_path.write_text(json.dumps({"status": "succeeded"}), encoding="utf-8")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", complete_then_write_marker)
+    result = cancel_workspace_bundle(operation_id)
+
+    assert result["cancel_requested"] is False
+    assert result["status"] == "succeeded"
+    assert not cancel_path.exists()
 
 
 @pytest.mark.parametrize(
@@ -308,12 +405,6 @@ def test_workspace_name_path_and_output_edge_cases(tmp_path: Path) -> None:
     with pytest.raises(PathValidationError, match="must include"):
         normalize_workspace_path(".")
 
-    root = tmp_path / "bundles"
-    existing = root / "my-job123"
-    existing.mkdir(parents=True)
-    assert workspace_bundle._unique_output_dir(root, "my-job123", "abcdef123456") == (
-        root / "my-job123-abcdef12"
-    )
     with pytest.raises(PathValidationError, match="build must"):
         workspace_bundle._build_path("my-job", "bad/build")
 
@@ -336,14 +427,18 @@ def test_start_downloads_reject_build_without_numeric_number(
             return None
 
         def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            if path == "job/my-job":
+                return _stable_job_state()
+            if path == "queue":
+                return {"items": []}
             return {}
 
     monkeypatch.setattr(workspace_bundle, "JenkinsClient", MissingBuildClient)
 
     with pytest.raises(WorkspaceBundleError, match="numeric build number") as bundle_error:
-        start_workspace_bundle_download("my-job")
+        start_workspace_bundle_download("my-job", "missing")
     with pytest.raises(WorkspaceBundleError, match="numeric build number") as path_error:
-        start_workspace_path_download("my-job", "reports/result.xml", "file")
+        start_workspace_path_download("my-job", "reports/result.xml", "file", "missing")
 
     assert bundle_error.value.code == "workspace_build_resolution_failed"
     assert path_error.value.code == "workspace_build_resolution_failed"

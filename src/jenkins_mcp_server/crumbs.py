@@ -46,7 +46,11 @@ class CrumbManager:
             raise JenkinsProtocolError("Jenkins crumb issuer response must be a JSON object")
         request_field = payload.get("crumbRequestField")
         crumb = payload.get("crumb")
-        if not request_field or not crumb:
-            return None
+        if not isinstance(request_field, str) or not request_field:
+            raise JenkinsProtocolError(
+                "Jenkins crumb issuer response omitted a valid crumbRequestField"
+            )
+        if not isinstance(crumb, str) or not crumb:
+            raise JenkinsProtocolError("Jenkins crumb issuer response omitted a valid crumb")
         self._crumb = Crumb(request_field=request_field, crumb=crumb)
         return self._crumb

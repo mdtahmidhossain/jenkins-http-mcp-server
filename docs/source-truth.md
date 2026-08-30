@@ -69,6 +69,15 @@ Date checked: 2026-08-30
   `X-More-Data` at `LargeText.java:433-485` in the official Stapler source JAR from
   `repo.jenkins-ci.org`.
 - Workspace browsing: `AbstractProject.doWs` serves workspace files and checks `Item.WORKSPACE` at `AbstractProject.java:1904-1927`.
+- Dynamic workspace selection: `AbstractProject.getSomeWorkspace` explicitly makes a cursory effort
+  to find some build workspace at `AbstractProject.java:532-565`; `/ws` does not bind the response to
+  a requested build number.
+- Job guard state: `Job.isInQueue` and `getQueueItem` are exported at `Job.java:294-304`, and
+  `Job.getLastBuild` is exported at `Job.java:960-971`.
+- Run guard state: `Run.getQueueId`, `getResult`, `isBuilding`, and `isInProgress` are exported at
+  `Run.java:448-523`. `isInProgress` includes both building and post-production.
+- Queue guard state: queue item ID/task and blocked/buildable/stuck fields are exported at
+  `Queue.java:2260-2334`; URL/why are exported at `Queue.java:2443-2463`.
 - Workspace/directory zip: `DirectoryBrowserSupport` recognizes `*zip*` at `DirectoryBrowserSupport.java:205-226` and writes zip archives at `DirectoryBrowserSupport.java:262-275`.
 - Artifacts: `Run.getArtifacts()` is `@Exported` at `Run.java:1075-1080`; `Run.doArtifact()` serves artifacts at `Run.java:2183-2191`.
 - Queue API: `Queue.getApi()` is at `Queue.java:1955-1957`; `Queue.getItems()` is exported at `Queue.java:787-810`.

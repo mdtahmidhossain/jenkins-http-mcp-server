@@ -3,7 +3,9 @@
 ## Credentials
 
 - Configure credentials through environment variables only: `JENKINS_USER` and `JENKINS_API_TOKEN`.
+- Set both credential variables or neither; omitting both uses Jenkins anonymous access.
 - Do not commit tokens or put real tokens in Codex/Gemini config.
+- Do not embed credentials in `JENKINS_URL`; URLs with user info, queries, or fragments are rejected.
 - Authorization, proxy authorization, cookie, and set-cookie headers are redacted by helper code before logging.
 - Jenkins API token/basic auth is used preemptively, matching official Jenkins scripted client guidance.
 
@@ -38,17 +40,33 @@ Workspace bundle tools can download large Jenkins workspace archives, extract th
 Safety behavior:
 
 - Streams archive and console log to disk; does not return file contents through MCP.
-- Writes progress to `.progress.json` and exposes status by operation ID.
+- Writes progress atomically to the operation's `progress.json` and exposes status by operation ID.
+- Uses a local SQLite registry to coordinate concurrent MCP clients. The registry stores request
+  metadata, worker ownership/heartbeat, status, and local paths; it does not store Jenkins tokens.
 - Uses `.partial` files/directories and renames only after successful steps.
+- Requires an absolute download root and reserves each build output directory with owner-only `0700`
+  permissions.
 - Deletes partial archive files on download failure.
 - Checks available disk space before downloads and before extracting declared zip contents.
 - Deletes the archive after successful extraction by default.
 - Rejects unsafe requested workspace paths, including external URLs, absolute paths, `..` traversal, Jenkins magic path segments, and wildcards.
 - Safely extracts zip files by rejecting absolute paths, `..` traversal, symlinks, special files, duplicate file entries, file count limit violations, and extracted byte limit violations.
 - Treats extracted files and console logs as untrusted.
-- Marks a still-running operation as interrupted on the next status check after the originating MCP
-  process exits, then removes archive/log/extraction partials. It does not silently resume.
+- Waits while REST reports the job queued, building, or in post-processing. An explicit build that is
+  not the current stable `lastBuild` is rejected instead of being falsely associated with `/ws`.
+- Checks Jenkins state before, during, and after the `/ws` stream. A changed state deletes the output
+  and retries once; another change fails. This is a race-reduction guard, not a snapshot guarantee.
+- Runs workspace captures in detached workers so an initiating STDIO process can exit. Stale worker
+  heartbeats are marked failed and their output is removed before a replacement starts.
+- Reuses a completed capture only for the same request/current anchor when all required local files
+  remain. Callers can request `force_refresh=true`.
 - Deletes retained terminal operation directories only through the explicit bounded cleanup tool.
+- A cancel request changes only a running registry row. Cancelling a terminal operation is a no-op,
+  and cancellation never rewrites a worker's progress file from a stale local copy.
+
+Jenkins `/ws` content remains untrusted and best-effort. Jenkins core does not attach a build number
+or version token to the workspace response, and `getSomeWorkspace` may select an available workspace
+from an older build. Use archived artifacts when exact historical build identity is required.
 
 Recommended large-download env values:
 
@@ -66,6 +84,10 @@ disk. They stream to `.partial` files, report bytes and speed through a local pr
 cancellation, enforce `JENKINS_MCP_MAX_ARTIFACT_BYTES`, preflight free space, and delete incomplete
 files after failure, cancellation, or interrupted-process recovery. They never return artifact bytes
 or base64 content through MCP.
+
+Each artifact output directory is reserved atomically with owner-only `0700` permissions. Cancelling
+an already terminal artifact operation is a no-op; a running cancellation writes only the marker so
+it cannot overwrite a concurrently completed progress file.
 
 Artifact paths must be relative and reject external URLs, absolute paths, traversal, query strings,
 fragments, wildcards, and Jenkins directory-browser magic segments.

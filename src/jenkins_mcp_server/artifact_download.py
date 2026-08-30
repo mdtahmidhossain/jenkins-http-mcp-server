@@ -22,11 +22,11 @@ from .workspace_bundle import (
     _indexed_path,
     _operation_was_interrupted,
     _read_operation_index,
+    _reserve_output_dir,
     _safe_name,
     _start_operation_thread,
     _timestamp,
     _transfer_progress,
-    _unique_output_dir,
     _write_operation_index,
     safe_job_name,
 )
@@ -93,6 +93,22 @@ def _artifact_indexed_path(root: Path, index: JsonDict, key: str) -> Path:
     )
 
 
+def _read_artifact_progress(progress_path: Path, operation_id: str) -> JsonDict:
+    try:
+        data = json.loads(progress_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkspaceBundleError(
+            "artifact_progress_invalid",
+            f"Progress data is invalid for operation {operation_id}",
+        ) from exc
+    if not isinstance(data, dict):
+        raise WorkspaceBundleError(
+            "artifact_progress_invalid",
+            f"Progress data is not an object for operation {operation_id}",
+        )
+    return data
+
+
 def start_artifact_download(
     job: str | list[str],
     artifact_path: str,
@@ -117,8 +133,7 @@ def start_artifact_download(
         ) from exc
 
     name_prefix = f"{safe_job_name(job)}{build_number}-artifact"
-    output_dir = _unique_output_dir(root, name_prefix, operation_id)
-    output_dir.mkdir(parents=True, exist_ok=False)
+    output_dir = _reserve_output_dir(root, name_prefix, operation_id)
     destination = output_dir / "artifact" / _safe_name(Path(normalized_path).name)
     progress_path = output_dir / ".progress.json"
     cancel_path = output_dir / ".cancel"
@@ -183,10 +198,10 @@ def read_artifact_download_status(operation_id: str) -> JsonDict:
             "artifact_progress_not_found",
             f"Progress file is missing for operation {operation_id}",
         )
-    data = json.loads(progress_path.read_text(encoding="utf-8"))
+    data = _read_artifact_progress(progress_path, operation_id)
     if data.get("status") != "running" or not _operation_was_interrupted(operation_id, index):
         return data
-    refreshed = json.loads(progress_path.read_text(encoding="utf-8"))
+    refreshed = _read_artifact_progress(progress_path, operation_id)
     if refreshed.get("status") != "running":
         return refreshed
     data = refreshed
@@ -221,20 +236,35 @@ def cancel_artifact_download(operation_id: str) -> JsonDict:
     config = JenkinsConfig.from_env()
     root = config.require_artifact_download()
     index = _artifact_index(root, operation_id)
-    cancel_path = _artifact_indexed_path(root, index, "cancel_path")
-    cancel_path.write_text(_timestamp() + "\n", encoding="utf-8")
     progress_path = _artifact_indexed_path(root, index, "progress_path")
     if progress_path.exists():
-        data = json.loads(progress_path.read_text(encoding="utf-8"))
-        if data.get("status") == "running":
-            data["cancel_requested"] = True
-            data["updated_at"] = _timestamp()
-            tmp = progress_path.with_name(f"{progress_path.name}.tmp")
-            tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-            tmp.replace(progress_path)
+        data = _read_artifact_progress(progress_path, operation_id)
+        status = data.get("status")
+        if status != "running":
+            return {
+                "operation_id": operation_id,
+                "cancel_requested": False,
+                "status": status,
+                "progress_path": str(progress_path),
+            }
+
+    cancel_path = _artifact_indexed_path(root, index, "cancel_path")
+    cancel_path.write_text(_timestamp() + "\n", encoding="utf-8")
+    status = "running" if progress_path.exists() else None
+    if progress_path.exists():
+        status = _read_artifact_progress(progress_path, operation_id).get("status")
+        if status in {"succeeded", "failed"}:
+            cancel_path.unlink(missing_ok=True)
+            return {
+                "operation_id": operation_id,
+                "cancel_requested": False,
+                "status": status,
+                "progress_path": str(progress_path),
+            }
     return {
         "operation_id": operation_id,
         "cancel_requested": True,
+        "status": status,
         "progress_path": str(progress_path),
     }
 

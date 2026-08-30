@@ -9,6 +9,15 @@ All notable changes are documented here.
 - Retry transient GET failures without replaying POST requests.
 - Add gated asynchronous artifact downloads with progress and cancellation.
 - Add disk-space preflight, interrupted-operation recovery, and explicit workspace retention cleanup.
+- Coordinate workspace captures across MCP processes with detached workers, guarded Jenkins REST
+  state, terminal-result reuse, and build-number-grouped local output.
+- Reject unsafe Jenkins URLs, non-finite numeric settings, relative download roots, encoded generic
+  path traversal, malformed crumb responses, and invalid version/health responses.
+- Reserve local download outputs atomically with owner-only permissions and prevent cancellation from
+  rewriting terminal progress.
+- Refresh Python 3.14.7, Codex environment forwarding, Gemini token forwarding, and Agent Skills
+  documentation against current official sources.
+- Depend on the MCP SDK without its unused CLI extra.
 - Add MIT licensing, security policy, package metadata, and trusted PyPI release automation.
 
 ## 0.1.0 - 2026-05-06

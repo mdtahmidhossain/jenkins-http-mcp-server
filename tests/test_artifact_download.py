@@ -88,6 +88,7 @@ def test_artifact_download_streams_to_disk_with_progress(
     assert destination.name == "report_file.zip"
     assert status["download"]["complete"] is True
     assert status["download"]["speed_bytes_per_second"] > 0
+    assert Path(status["output_dir"]).stat().st_mode & 0o777 == 0o700
     assert seen_paths == [
         "job/folder/job/my%20job/123/artifact/reports/report%20file.zip"
     ]
@@ -226,8 +227,9 @@ def test_artifact_status_cancel_and_missing_progress(
 
     assert artifact_download.read_artifact_download_status(operation_id)["status"] == "succeeded"
     cancelled = artifact_download.cancel_artifact_download(operation_id)
-    assert cancelled["cancel_requested"] is True
-    assert cancel_path.exists()
+    assert cancelled["cancel_requested"] is False
+    assert cancelled["status"] == "succeeded"
+    assert not cancel_path.exists()
 
     running_id = "d" * 32
     running_dir = root / "running"
@@ -239,8 +241,10 @@ def test_artifact_status_cancel_and_missing_progress(
         running_progress,
         running_dir / ".cancel",
     )
+    running_cancel = running_dir / ".cancel"
     artifact_download.cancel_artifact_download(running_id)
-    assert json.loads(running_progress.read_text())["cancel_requested"] is True
+    assert running_cancel.exists()
+    assert json.loads(running_progress.read_text()) == {"status": "running"}
 
     missing_id = "c" * 32
     missing_progress = root / "missing" / ".progress.json"
@@ -256,6 +260,48 @@ def test_artifact_status_cancel_and_missing_progress(
     assert error.value.code == "artifact_progress_not_found"
     no_progress_cancel = artifact_download.cancel_artifact_download(missing_id)
     assert no_progress_cancel["cancel_requested"] is True
+
+
+def test_artifact_progress_validation_and_cancel_completion_race(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "artifacts"
+    _set_artifact_env(monkeypatch, root)
+    operation_id = "f" * 32
+    operation_dir = root / "operation"
+    progress_path = operation_dir / ".progress.json"
+    cancel_path = operation_dir / ".cancel"
+    operation_dir.mkdir(parents=True)
+    workspace_bundle._write_operation_index(root, operation_id, progress_path, cancel_path)
+
+    progress_path.write_text("not-json", encoding="utf-8")
+    with pytest.raises(WorkspaceBundleError) as read_error:
+        artifact_download.read_artifact_download_status(operation_id)
+    assert read_error.value.code == "artifact_progress_invalid"
+    with pytest.raises(WorkspaceBundleError) as cancel_error:
+        artifact_download.cancel_artifact_download(operation_id)
+    assert cancel_error.value.code == "artifact_progress_invalid"
+
+    progress_path.write_text("[]", encoding="utf-8")
+    with pytest.raises(WorkspaceBundleError, match="not an object"):
+        artifact_download.read_artifact_download_status(operation_id)
+
+    ProgressFile(progress_path, {"status": "running"})
+    original_write_text = Path.write_text
+
+    def complete_then_write_marker(path: Path, *args: Any, **kwargs: Any) -> int:
+        if path == cancel_path:
+            ProgressFile(progress_path, {"status": "succeeded"})
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", complete_then_write_marker)
+    result = artifact_download.cancel_artifact_download(operation_id)
+
+    assert result["cancel_requested"] is False
+    assert result["status"] == "succeeded"
+    assert not cancel_path.exists()
+    assert json.loads(progress_path.read_text()) == {"status": "succeeded"}
 
 
 def test_artifact_runner_cancellation_and_failures(

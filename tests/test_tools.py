@@ -32,9 +32,13 @@ def test_tool_schemas_registered() -> None:
 def test_tool_schema_has_parameters() -> None:
     mcp = build_server()
     tool = mcp._tool_manager._tools["jenkins_get_json"]  # noqa: SLF001
+    workspace_tool = mcp._tool_manager._tools[  # noqa: SLF001
+        "jenkins_start_workspace_bundle_download"
+    ]
 
     assert "path" in tool.parameters["properties"]
     assert tool.parameters["required"] == ["path"]
+    assert workspace_tool.parameters["properties"]["force_refresh"]["default"] is False
 
 
 def _tool_fn(server, name: str):
@@ -193,6 +197,49 @@ def test_tool_errors_are_returned_as_structured_payloads(
     assert blocked_write["error"]["code"] == "permission_gate"
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "response", "message"),
+    [
+        (
+            "jenkins_version",
+            httpx.Response(200, json={"mode": "NORMAL"}),
+            "X-Jenkins",
+        ),
+        (
+            "jenkins_health",
+            httpx.Response(200, text="not-json", headers={"X-Jenkins": "2.579"}),
+            "valid JSON",
+        ),
+        (
+            "jenkins_health",
+            httpx.Response(200, json=[], headers={"X-Jenkins": "2.579"}),
+            "JSON object",
+        ),
+    ],
+)
+def test_version_and_health_reject_invalid_jenkins_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    response: httpx.Response,
+    message: str,
+) -> None:
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def request(self, method: str, path: str, *, params=None) -> httpx.Response:
+            return response
+
+    monkeypatch.setattr(tool_module, "_client", lambda: FakeClient())
+    result = _tool_fn(build_server(), tool_name)()
+
+    assert result["error"]["code"] == "jenkins_protocol_error"
+    assert message in result["error"]["message"]
+
+
 def test_write_tools_execute_gated_client_posts(monkeypatch: pytest.MonkeyPatch) -> None:
     gate_calls: list[str] = []
     post_calls: list[tuple[str, dict[str, Any]]] = []
@@ -270,17 +317,23 @@ def test_workspace_tools_delegate_to_bundle_operations(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         tool_module,
         "start_workspace_bundle_download",
-        lambda job, build: {"operation": "bundle", "job": job, "build": build},
+        lambda job, build, force_refresh: {
+            "operation": "bundle",
+            "job": job,
+            "build": build,
+            "force_refresh": force_refresh,
+        },
     )
     monkeypatch.setattr(
         tool_module,
         "start_workspace_path_download",
-        lambda job, path, kind, build: {
+        lambda job, path, kind, build, force_refresh: {
             "operation": "path",
             "job": job,
             "path": path,
             "kind": kind,
             "build": build,
+            "force_refresh": force_refresh,
         },
     )
     monkeypatch.setattr(
@@ -300,18 +353,25 @@ def test_workspace_tools_delegate_to_bundle_operations(monkeypatch: pytest.Monke
     )
     server = build_server()
 
-    assert _tool_fn(server, "jenkins_start_workspace_bundle_download")("demo", 12)["data"][
-        "operation"
-    ] == "bundle"
-    assert _tool_fn(server, "jenkins_start_workspace_path_download")(
-        "demo", "reports/results.xml", "file", 12
-    )["data"]["operation"] == "path"
-    assert _tool_fn(server, "jenkins_get_workspace_bundle_status")("a" * 32)["data"][
-        "status"
-    ] == "running"
-    assert _tool_fn(server, "jenkins_cancel_workspace_bundle_download")("a" * 32)["data"][
-        "cancel_requested"
-    ] is True
+    bundle = _tool_fn(server, "jenkins_start_workspace_bundle_download")("demo", 12, True)["data"]
+    assert bundle["operation"] == "bundle"
+    assert bundle["force_refresh"] is True
+    assert (
+        _tool_fn(server, "jenkins_start_workspace_path_download")(
+            "demo", "reports/results.xml", "file", 12, True
+        )["data"]["operation"]
+        == "path"
+    )
+    assert (
+        _tool_fn(server, "jenkins_get_workspace_bundle_status")("a" * 32)["data"]["status"]
+        == "running"
+    )
+    assert (
+        _tool_fn(server, "jenkins_cancel_workspace_bundle_download")("a" * 32)["data"][
+            "cancel_requested"
+        ]
+        is True
+    )
     assert _tool_fn(server, "jenkins_cleanup_workspace_bundle_operations")(14, 25)["data"] == {
         "older_than_days": 14,
         "max_operations": 25,

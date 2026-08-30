@@ -30,15 +30,46 @@ HTTP transport was not added because STDIO is the requested first target for Cod
 
 ## Long-Running Downloads
 
-Workspace bundle downloads run asynchronously. `jenkins_start_workspace_bundle_download` resolves the build number, creates a local operation directory, and starts a background worker. Progress is written to `.progress.json` and returned by `jenkins_get_workspace_bundle_status`, including downloaded bytes, total bytes when Jenkins sends `Content-Length`, speed, elapsed seconds, phase, and paths. `jenkins_cancel_workspace_bundle_download` writes a cancel marker that the worker checks during download and extraction.
+Workspace downloads run asynchronously in detached Python worker processes. A SQLite registry at
+`<workspace-download-root>/.operations/workspace-operations.sqlite3` coordinates all local Codex and
+Gemini MCP processes. It permits one active operation per Jenkins URL, Jenkins user, and normalized
+request; concurrent starts join that operation. The registry contains request metadata and local
+paths, never the API token.
 
-`jenkins_start_workspace_path_download` uses the same async operation model for one requested workspace file or folder. File downloads stream directly to disk. Folder downloads use Jenkins' workspace zip support, extract locally, and delete the archive after successful extraction.
+The worker polls the normal job and queue REST APIs until the job is not queued and no recent run is
+building or in post-production. It then anchors the capture to the stable `lastBuild`. An explicit
+different build is rejected because Jenkins `/ws` cannot retrieve an immutable historical workspace.
+The worker checks the same REST state before, during, and after the workspace stream. A change deletes
+the attempted output and retries once; a second change fails with
+`workspace_changed_during_download`.
+
+This guard is deliberately labeled best-effort. Jenkins core `AbstractProject.doWs` calls
+`getSomeWorkspace`, which makes only a cursory effort to select some available build workspace and
+does not return a workspace build identity. REST observations reduce the race window but do not make
+the workspace endpoint transactional.
+
+Progress is written atomically under the operation directory and returned by
+`jenkins_get_workspace_bundle_status`, including wait/capture phase, downloaded bytes, total bytes
+when Jenkins sends `Content-Length`, speed, elapsed time, and local paths. Cancellation is durable in
+SQLite and also uses a local marker checked during wait, download, extraction, and log capture.
+Only running rows accept cancellation; terminal operations are left unchanged.
+
+Completed matching captures are reused only when Jenkins is currently stable on the same anchor and
+the expected workspace/path, console log, and metadata still exist. `force_refresh=true` bypasses
+reuse. File downloads stream directly to disk. Folder/full-workspace downloads use Jenkins zip
+support, extract locally, and delete the archive after successful extraction.
+
+Capture output is grouped as `<workspace-download-root>/<job path>/<build number>/`. Archive and
+console filenames retain the combined safe job/build prefix, such as `my-job123.zip` and
+`my-job123-console.log`. Existing-directory collisions receive a short operation ID suffix. Build
+and artifact output directories are reserved atomically with owner-only `0700` permissions.
 
 Individual build artifacts use a separate async operation root and safety gate. Artifact bytes stream
 to disk; MCP returns only status, progress, and final local paths. Both operation types preflight free
-space, remove failed partials, support cancellation, and detect workers interrupted by MCP process
-exit. Interrupted operations are marked failed rather than resumed because Jenkins responses are not
-assumed to support byte-range recovery.
+space, remove failed partials, and support cancellation. Artifact workers still use the legacy
+in-process model; workspace workers are detached and use stale-heartbeat recovery. Interrupted
+downloads are not resumed because Jenkins responses are not assumed to support byte-range recovery.
+Artifact cancellation writes only its marker and never rewrites progress from a stale read.
 
 ## HTTP Reliability
 

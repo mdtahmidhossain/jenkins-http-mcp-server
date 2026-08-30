@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,9 +41,31 @@ def _float_env(name: str, default: float, minimum: float = 0.1) -> float:
         value = float(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise ConfigError(f"{name} must be a finite number")
     if value < minimum:
         raise ConfigError(f"{name} must be >= {minimum}")
     return value
+
+
+def _path_env(name: str) -> Path | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ConfigError(f"{name} must be an absolute path")
+    return path.resolve()
+
+
+def _ensure_directory(path: Path, env_name: str) -> Path:
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConfigError(f"{env_name} could not be created or accessed") from exc
+    if not path.is_dir():
+        raise ConfigError(f"{env_name} must identify a directory")
+    return path
 
 
 @dataclass(frozen=True)
@@ -76,9 +99,23 @@ class JenkinsConfig:
         if not url:
             raise ConfigError("JENKINS_URL is required")
 
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            _ = parsed.port
+        except ValueError as exc:
+            raise ConfigError("JENKINS_URL must be a valid absolute http(s) URL") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or hostname is None
+            or any(character.isspace() or ord(character) < 32 for character in url)
+        ):
             raise ConfigError("JENKINS_URL must be an absolute http(s) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ConfigError("JENKINS_URL must not contain credentials")
+        if parsed.query or parsed.fragment:
+            raise ConfigError("JENKINS_URL must not contain a query string or fragment")
 
         user = os.getenv("JENKINS_USER") or None
         api_token = os.getenv("JENKINS_API_TOKEN") or None
@@ -104,11 +141,7 @@ class JenkinsConfig:
                 "JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD",
                 False,
             ),
-            workspace_download_dir=(
-                Path(raw_download_dir).expanduser().resolve()
-                if (raw_download_dir := os.getenv("JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR"))
-                else None
-            ),
+            workspace_download_dir=_path_env("JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR"),
             max_workspace_archive_bytes=_int_env(
                 "JENKINS_MCP_MAX_WORKSPACE_ARCHIVE_BYTES",
                 6_000_000_000,
@@ -130,11 +163,7 @@ class JenkinsConfig:
                 "JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD",
                 False,
             ),
-            artifact_download_dir=(
-                Path(raw_artifact_dir).expanduser().resolve()
-                if (raw_artifact_dir := os.getenv("JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR"))
-                else None
-            ),
+            artifact_download_dir=_path_env("JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR"),
             max_artifact_bytes=_int_env(
                 "JENKINS_MCP_MAX_ARTIFACT_BYTES",
                 6_000_000_000,
@@ -178,8 +207,10 @@ class JenkinsConfig:
             raise PermissionGateError(
                 "Workspace bundle tools require JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR"
             )
-        self.workspace_download_dir.mkdir(parents=True, exist_ok=True)
-        return self.workspace_download_dir
+        return _ensure_directory(
+            self.workspace_download_dir,
+            "JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR",
+        )
 
     def require_artifact_download(self) -> Path:
         from .errors import PermissionGateError
@@ -192,5 +223,7 @@ class JenkinsConfig:
             raise PermissionGateError(
                 "Artifact download tools require JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR"
             )
-        self.artifact_download_dir.mkdir(parents=True, exist_ok=True)
-        return self.artifact_download_dir
+        return _ensure_directory(
+            self.artifact_download_dir,
+            "JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR",
+        )

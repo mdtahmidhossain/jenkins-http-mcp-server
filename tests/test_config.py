@@ -120,9 +120,25 @@ def test_environment_parser_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEST_FLOAT", "0")
     with pytest.raises(ConfigError, match="TEST_FLOAT must be >= 0.1"):
         _float_env("TEST_FLOAT", 1.0)
+    for value in ("nan", "inf", "-inf"):
+        monkeypatch.setenv("TEST_FLOAT", value)
+        with pytest.raises(ConfigError, match="finite"):
+            _float_env("TEST_FLOAT", 1.0)
 
 
-@pytest.mark.parametrize("url", ["", "ftp://jenkins.example.com", "https:///missing-host"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "",
+        "ftp://jenkins.example.com",
+        "https:///missing-host",
+        "https://user:token@jenkins.example.com/",
+        "https://jenkins.example.com/?depth=1",
+        "https://jenkins.example.com/#fragment",
+        "https://jenkins.example.com:bad/",
+        "https://jenkins.example.com/bad path/",
+    ],
+)
 def test_config_rejects_missing_or_invalid_url(
     monkeypatch: pytest.MonkeyPatch,
     url: str,
@@ -160,3 +176,42 @@ def test_specific_write_and_workspace_directory_gates() -> None:
     )
     with pytest.raises(PermissionGateError, match="ARTIFACT_DOWNLOAD_DIR"):
         artifact_config.require_artifact_download()
+
+
+def test_download_directories_must_be_absolute_and_usable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("JENKINS_URL", "https://jenkins.example.com/")
+    monkeypatch.setenv("JENKINS_MCP_WORKSPACE_DOWNLOAD_DIR", "relative/downloads")
+    with pytest.raises(ConfigError, match="absolute path"):
+        JenkinsConfig.from_env()
+
+    artifact_file = tmp_path / "artifact-file"
+    artifact_file.write_text("not a directory", encoding="utf-8")
+    config = JenkinsConfig(
+        url="https://jenkins.example.com/",
+        user="u",
+        api_token="t",
+        enable_artifact_download=True,
+        artifact_download_dir=artifact_file,
+    )
+    with pytest.raises(ConfigError, match="could not be created or accessed"):
+        config.require_artifact_download()
+
+
+def test_download_directory_type_is_checked_after_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    destination = tmp_path / "missing"
+    monkeypatch.setattr(type(destination), "mkdir", lambda self, **kwargs: None)
+    config = JenkinsConfig(
+        url="https://jenkins.example.com/",
+        user="u",
+        api_token="t",
+        enable_workspace_download=True,
+        workspace_download_dir=destination,
+    )
+    with pytest.raises(ConfigError, match="must identify a directory"):
+        config.require_workspace_download()

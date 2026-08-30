@@ -150,8 +150,8 @@ class JenkinsHTTPError(JenkinsMCPError):
             hint = " Check JENKINS_USER and JENKINS_API_TOKEN."
         elif self.status_code == 403:
             hint = (
-                " Jenkins denied access; your user may lack the required permission or a crumb"
-                " may be required."
+                " Jenkins denied access; credentials may be invalid, your user may lack the"
+                " required permission, or a crumb may be required."
             )
         elif self.status_code == 404:
             hint = " The endpoint, job, build, plugin-provided action, or item was not found."

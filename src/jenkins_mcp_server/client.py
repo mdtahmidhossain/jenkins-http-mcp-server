@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -51,10 +51,12 @@ def normalize_relative_path(path: str) -> str:
     split = urlsplit(raw)
     if split.scheme or split.netloc:
         raise PathValidationError("Only relative Jenkins paths are accepted")
-    if raw.startswith("//"):
-        raise PathValidationError("Protocol-relative URLs are not accepted")
+    if raw.startswith(("/", "\\")):
+        raise PathValidationError("Only relative Jenkins paths are accepted")
+    if split.fragment:
+        raise PathValidationError("Jenkins paths must not include fragments")
 
-    clean_path = split.path.lstrip("/")
+    clean_path = split.path
     if not clean_path:
         raise PathValidationError("Jenkins path must include a path component")
 
@@ -64,9 +66,18 @@ def normalize_relative_path(path: str) -> str:
             continue
         if segment == "..":
             raise PathValidationError("Path traversal is not allowed")
-        decoded = segment.replace("%2e", ".").replace("%2E", ".")
+        if "\\" in segment:
+            raise PathValidationError("Backslash path separators are not allowed")
+        decoded = segment
+        while "%" in decoded:
+            next_decoded = unquote(decoded)
+            if next_decoded == decoded:
+                break
+            decoded = next_decoded
         if decoded == "..":
             raise PathValidationError("Encoded path traversal is not allowed")
+        if decoded == "." or "/" in decoded or "\\" in decoded:
+            raise PathValidationError("Encoded path separators are not allowed")
         segments.append(segment)
 
     if not segments:
@@ -171,6 +182,15 @@ class JenkinsClient:
         relative = normalize_relative_path(path)
         return self.config.url + relative, relative
 
+    @staticmethod
+    def _merged_params(
+        url: str,
+        params: Mapping[str, Any] | None,
+    ) -> httpx.QueryParams | None:
+        if params is None:
+            return None
+        return httpx.QueryParams(urlsplit(url).query).merge(params)
+
     def _raise_for_status(self, response: httpx.Response, method: str, path: str) -> None:
         if response.status_code < 400:
             return
@@ -245,7 +265,7 @@ class JenkinsClient:
                 with self.http.stream(
                     "GET",
                     url,
-                    params=params,
+                    params=self._merged_params(url, params),
                     headers=dict(headers or {}),
                 ) as response:
                     if response.status_code >= 300:
@@ -289,7 +309,7 @@ class JenkinsClient:
             with self.http.stream(
                 "POST",
                 url,
-                params=params,
+                params=self._merged_params(url, params),
                 data=data,
                 content=content,
                 headers=dict(headers),
@@ -303,7 +323,15 @@ class JenkinsClient:
     def _get_crumb(self, *, required: bool) -> Any:
         try:
             return self.crumbs.get(self.http, self.config.url)
-        except httpx.HTTPStatusError:
+        except httpx.HTTPStatusError as exc:
+            if required:
+                response = exc.response
+                raise JenkinsHTTPError(
+                    response.status_code,
+                    "GET",
+                    "crumbIssuer/api/json",
+                    response.reason_phrase or "Jenkins crumb issuer request failed",
+                ) from exc
             return None
         except (JenkinsProtocolError, ResponseTooLargeError):
             if required:

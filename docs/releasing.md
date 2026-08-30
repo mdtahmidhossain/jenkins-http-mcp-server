@@ -24,7 +24,7 @@ The workflow uses OIDC trusted publishing and stores no PyPI API token.
 python -m pytest
 python -m compileall src
 ruff check
-python -m pip install -e '.[release]'
+python -m pip install -e '.[dev,release]'
 rm -rf build dist
 python -m build
 python -m twine check dist/*

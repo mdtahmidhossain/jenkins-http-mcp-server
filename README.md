@@ -9,15 +9,17 @@ It does not require Jenkins administrator access, does not install Jenkins plugi
 
 ## Python Setup
 
-This project was initialized with pyenv using the latest stable Python 3.14.x available locally:
+This project uses the latest stable Python 3.14.x listed by pyenv when last checked on 2026-08-30:
 
-- Python: `3.14.4`
-- pyenv virtualenv: `venv3144`
+- Python: `3.14.7`
+- pyenv virtualenv: `venv3147`
 
 To reproduce:
 
 ```bash
-pyenv local venv3144
+pyenv install -s 3.14.7
+pyenv virtualenvs --bare | grep -qx venv3147 || pyenv virtualenv 3.14.7 venv3147
+pyenv local venv3147
 python --version
 which python
 pyenv version
@@ -35,6 +37,11 @@ Required:
 
 ```bash
 export JENKINS_URL="https://jenkins.example.com/"
+```
+
+For authenticated access, set both credentials. Leaving both unset uses Jenkins anonymous access:
+
+```bash
 export JENKINS_USER="your-user"
 export JENKINS_API_TOKEN="your-api-token"
 ```
@@ -80,6 +87,8 @@ export JENKINS_MCP_ENABLE_DELETE=1
 ```
 
 Do not store real Jenkins secrets in MCP client config files.
+`JENKINS_URL` must be an absolute HTTP(S) URL without embedded credentials, a query, or a fragment.
+Download directory settings must be absolute paths.
 
 ## Run STDIO Server
 
@@ -137,6 +146,39 @@ Workspace bundle tools, gated by `JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1` and
 workspace `folder` plus the selected build run's console log. Folder downloads
 are extracted locally and the zip archive is deleted after successful extraction.
 
+Workspace starts use a REST guard around Jenkins' dynamic job-level `/ws` endpoint:
+
+- They inspect the job and queue, then wait while the job is queued, building, or in
+  post-processing. Status reports the current wait phase.
+- A stable `lastBuild` number anchors the capture. An explicit older build is rejected with
+  `workspace_build_not_current`; use archived artifacts for historical build files.
+- Jenkins state is checked before, during, and after the `/ws` transfer. If it changes, the partial
+  output is deleted and the capture is retried once. A second change fails clearly.
+- Matching callers on the same machine join one operation through a SQLite registry under the
+  configured download root. Detached workers continue if the initiating MCP process exits.
+- A completed matching capture is reused only while its anchor still equals the current stable
+  `lastBuild` and all required local files exist. Pass `force_refresh=true` to bypass reuse.
+- Start responses identify the result as `started`, `joined`, or `reused`. Poll
+  `jenkins_get_workspace_bundle_status` for bytes, speed, phase, and final paths.
+
+For a full workspace anchored to build `123`, the temporary archive is named `<safe-job>123.zip`,
+for example `my-job123.zip`. It is extracted under `workspace/` and deleted after successful
+extraction. The exact run console is saved as `<safe-job>123-console.log`.
+
+Local output is grouped first by Jenkins job and then by build number:
+
+```text
+<workspace-download-root>/
+└── my-job/
+    └── 123/
+        ├── workspace/
+        ├── my-job123-console.log
+        └── metadata.json
+```
+
+If that build directory already exists and cannot be reused, the new directory receives the
+operation ID suffix, for example `my-job/123-a4f720c1/`.
+
 Artifact download tools, gated by `JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD=1` and
 `JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR`:
 
@@ -179,6 +221,8 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 - HTTP response limits are enforced while bytes arrive. Transient GET failures are retried up to
   three attempts; POST requests are never automatically replayed.
 - Large local downloads preflight free disk space, use partial paths, and remove failed partials.
+- Newly reserved build and artifact output directories use owner-only `0700` permissions.
+- Cancelling an already terminal local download is a no-op and reports `cancel_requested=false`.
 
 ## Limitations
 
@@ -192,14 +236,25 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 - "Plugin-dependent" means Jenkins core does not guarantee that endpoint; it exists only when an
   installed plugin provides it. This server never installs or enables that plugin.
 - `jenkins_get_test_report` depends on a test-report plugin such as JUnit exposing `testReport`; it fails clearly if absent.
+- Jenkins core evidence for `jenkins_stop_build` is `AbstractBuild.doStop`. Plugin-defined run types,
+  including Pipeline runs, may expose different stop behavior; Jenkins 404/403 responses are returned
+  clearly rather than treated as success.
 - Jenkins 2.574 stopped bundling JUnit. Controllers that do not already have the JUnit plugin may not expose `testReport`.
 - Jenkins 2.579 removed Apache Commons Lang 2 from core. Update installed plugins before upgrading Jenkins because outdated plugins that relied on the core-provided library may fail to load.
 - Jenkins 2.579 reserializes job configuration for `GET config.xml` and after `POST config.xml`. Config XML formatting, comments, and element ordering are not guaranteed to round-trip byte-for-byte.
 - Nested folder paths are URL-encoded as repeated `job/<segment>` path components. Controllers without the needed folder/job type return Jenkins 404s.
-- Workspace downloads use Jenkins' job-level workspace endpoint. The saved console log is build-run-specific, but the workspace is the current/some available job workspace and may not be an immutable snapshot of that build.
+- Workspace downloads use Jenkins' dynamic job-level `/ws` endpoint. Jenkins core can select some
+  available workspace and exposes no workspace build/version identity in that response. The REST
+  guard reduces races but cannot make `/ws` an immutable or transactionally consistent build
+  snapshot; `workspace_freshness` is therefore `best_effort`.
+- Exact historical files require archived build artifacts. Passing a build other than the current
+  stable `lastBuild` to a workspace start is rejected.
+- Core `/ws` evidence applies to `AbstractProject`. Other job types may expose workspace behavior
+  through plugins; unsupported controllers or job types return Jenkins 404/permission errors.
 - Workspace operations stream to disk and report status/progress through `jenkins_get_workspace_bundle_status`; large downloads can still stress Jenkins controllers or agents.
-- Background download workers do not survive MCP server exit. A later status check marks an
-  interrupted operation failed and removes its partial files; restart the download explicitly.
+- Workspace workers are detached from the initiating STDIO MCP process. Multiple local MCP clients
+  share operation state through SQLite. If a worker dies, a later status/start operation marks its
+  stale capture failed and removes its retained output before replacement.
 - Progressive log chunks must fit `JENKINS_MCP_MAX_LOG_BYTES`. If Jenkins has accumulated a larger
   interval than the limit, the tool returns `response_too_large` without advancing the cursor.
 - Build artifacts are archived build outputs. Workspace files are separate, current job-level data.

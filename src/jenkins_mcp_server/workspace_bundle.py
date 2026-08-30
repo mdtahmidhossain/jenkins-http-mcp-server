@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import shutil
 import stat
+import subprocess
+import sys
 import threading
 import time
 import uuid
 import zipfile
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
-from .client import JenkinsClient, ensure_free_space, job_path, safe_segment
+from .client import GET_MAX_ATTEMPTS, JenkinsClient, ensure_free_space, job_path, safe_segment
 from .config import JenkinsConfig
 from .errors import (
     JenkinsMCPError,
@@ -23,11 +28,16 @@ from .errors import (
     ToolInputError,
     WorkspaceBundleError,
 )
+from .workspace_registry import WorkspaceOperationRegistry
 
 JsonDict = dict[str, Any]
 WORKSPACE_MAGIC_SEGMENTS = {"*zip*", "*plain*", "*view*", "*fingerprint*"}
 TERMINAL_OPERATION_STATUSES = {"succeeded", "failed", "cancelled"}
 WORKSPACE_OPERATION_TYPES = {None, "workspace_bundle", "workspace_path_download"}
+WORKSPACE_STATE_POLL_SECONDS = 10.0
+WORKSPACE_CAPTURE_MAX_ATTEMPTS = 2
+WORKSPACE_HEARTBEAT_SECONDS = 2.0
+WORKSPACE_STATE_REQUESTS_PER_PROBE = 2
 _SERVER_INSTANCE_ID = uuid.uuid4().hex
 _ACTIVE_OPERATIONS: dict[str, threading.Thread] = {}
 _ACTIVE_OPERATIONS_LOCK = threading.Lock()
@@ -46,13 +56,264 @@ class ProgressFile:
         self.write()
 
     def write(self) -> None:
-        tmp = self.path.with_name(f"{self.path.name}.tmp")
-        tmp.write_text(json.dumps(self.data, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.path)
+        tmp = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(json.dumps(self.data, indent=2, sort_keys=True), encoding="utf-8")
+            tmp.replace(self.path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+class _WorkspaceStateChanged(Exception):
+    def __init__(self, state: JsonDict) -> None:
+        super().__init__("Jenkins workspace state changed during download")
+        self.state = state
 
 
 def _timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _stale_before(config: JenkinsConfig) -> float:
+    state_probe_budget = (
+        config.timeout_seconds * GET_MAX_ATTEMPTS * WORKSPACE_STATE_REQUESTS_PER_PROBE
+    )
+    stale_seconds = max(
+        120.0,
+        state_probe_budget + 30.0,
+        WORKSPACE_STATE_POLL_SECONDS * 4,
+    )
+    return time.time() - stale_seconds
+
+
+def _request_key(config: JenkinsConfig, request: JsonDict) -> str:
+    normalized_request = dict(request)
+    normalized_request["job"] = job_path(normalized_request["job"])
+    normalized_request["build"] = str(normalized_request["build"])
+    identity = {
+        "jenkins_url": config.url,
+        "jenkins_user": config.user,
+        "request": normalized_request,
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _operation_paths(root: Path, operation_id: str) -> tuple[Path, Path, Path]:
+    operation_dir = operation_index_dir(root) / operation_id
+    return operation_dir, operation_dir / "progress.json", operation_dir / "cancel"
+
+
+def _path_under_root(root: Path, raw: str | Path, label: str) -> Path:
+    path = Path(raw)
+    root_resolved = root.resolve()
+    path_resolved = path.resolve(strict=False)
+    if path_resolved == root_resolved or root_resolved not in path_resolved.parents:
+        raise WorkspaceBundleError(
+            "workspace_operation_index_invalid",
+            f"Workspace operation has an unsafe {label}",
+        )
+    return path
+
+
+def _normalize_object_url(base_url: str, value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return urljoin(base_url, value).rstrip("/")
+
+
+def _build_state(value: Any) -> JsonDict:
+    if not isinstance(value, dict):
+        raise WorkspaceBundleError(
+            "workspace_state_unavailable",
+            "Jenkins build state was not an object",
+        )
+    try:
+        number = int(value["number"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WorkspaceBundleError(
+            "workspace_state_unavailable",
+            "Jenkins build state omitted a numeric build number",
+        ) from exc
+    in_progress = value.get("inProgress")
+    building = value.get("building")
+    if not isinstance(in_progress, bool) or not isinstance(building, bool):
+        raise WorkspaceBundleError(
+            "workspace_state_unavailable",
+            f"Jenkins build {number} omitted building or inProgress state",
+        )
+    return {
+        "number": number,
+        "url": value.get("url"),
+        "queue_id": value.get("queueId"),
+        "building": building,
+        "in_progress": in_progress,
+        "result": value.get("result"),
+    }
+
+
+def _probe_workspace_state(client: JenkinsClient, job: str | list[str]) -> JsonDict:
+    job_data = client.get_json(
+        job_path(job),
+        params={
+            "tree": (
+                "url,inQueue,queueItem[id],"
+                "lastBuild[number,url,queueId,building,inProgress,result],"
+                "lastCompletedBuild[number],"
+                "builds[number,url,queueId,building,inProgress,result]"
+            )
+        },
+    )
+    queue_data = client.get_json(
+        "queue",
+        params={
+            "tree": (
+                "items[id,url,why,blocked,buildable,stuck,cancelled,"
+                "task[name,url],executable[number,url]]"
+            )
+        },
+    )
+    if not isinstance(job_data, dict) or not isinstance(queue_data, dict):
+        raise WorkspaceBundleError(
+            "workspace_state_unavailable",
+            "Jenkins job or queue state was not an object",
+        )
+
+    job_url = _normalize_object_url(client.config.url, job_data.get("url"))
+    if job_url is None:
+        raise WorkspaceBundleError(
+            "workspace_state_unavailable",
+            "Jenkins job state omitted its URL",
+        )
+    in_queue = job_data.get("inQueue")
+    if not isinstance(in_queue, bool):
+        raise WorkspaceBundleError(
+            "workspace_state_unavailable",
+            "Jenkins job state omitted inQueue",
+        )
+
+    raw_builds = job_data.get("builds")
+    if not isinstance(raw_builds, list):
+        raise WorkspaceBundleError(
+            "workspace_state_unavailable",
+            "Jenkins job state omitted its recent builds",
+        )
+    builds_by_number: dict[int, JsonDict] = {}
+    for raw_build in raw_builds:
+        build = _build_state(raw_build)
+        builds_by_number[int(build["number"])] = build
+
+    raw_last_build = job_data.get("lastBuild")
+    last_build = None if raw_last_build is None else _build_state(raw_last_build)
+    if last_build is not None:
+        builds_by_number[int(last_build["number"])] = last_build
+    active_builds = sorted(
+        (build for build in builds_by_number.values() if build["in_progress"]),
+        key=lambda build: int(build["number"]),
+    )
+
+    raw_items = queue_data.get("items")
+    if not isinstance(raw_items, list):
+        raise WorkspaceBundleError(
+            "workspace_state_unavailable",
+            "Jenkins queue state omitted its items",
+        )
+    queued_items: list[JsonDict] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict) or raw_item.get("cancelled") is True:
+            continue
+        task = raw_item.get("task")
+        task_url = (
+            _normalize_object_url(client.config.url, task.get("url"))
+            if isinstance(task, dict)
+            else None
+        )
+        if task_url != job_url:
+            continue
+        queued_items.append(
+            {
+                "id": raw_item.get("id"),
+                "why": raw_item.get("why"),
+                "blocked": raw_item.get("blocked"),
+                "buildable": raw_item.get("buildable"),
+                "stuck": raw_item.get("stuck"),
+            }
+        )
+
+    queue_unresolved = in_queue and not queued_items
+    stable = not in_queue and not queued_items and not active_builds
+    return {
+        "checked_at": _timestamp(),
+        "job_url": job_data.get("url"),
+        "in_queue": in_queue,
+        "queue_unresolved": queue_unresolved,
+        "queued_items": queued_items,
+        "active_builds": active_builds,
+        "last_build": last_build,
+        "last_completed_build": job_data.get("lastCompletedBuild"),
+        "stable": stable,
+    }
+
+
+def _workspace_wait_phase(state: JsonDict) -> str:
+    active = state.get("active_builds", [])
+    if any(build.get("building") is True for build in active):
+        return "waiting_for_build"
+    if active:
+        return "waiting_for_post_processing"
+    return "waiting_for_queue"
+
+
+def _state_anchor(state: JsonDict) -> int:
+    last_build = state.get("last_build")
+    if not isinstance(last_build, dict):
+        raise WorkspaceBundleError(
+            "workspace_no_build",
+            "Jenkins job has no build that can anchor the current workspace",
+        )
+    try:
+        return int(last_build["number"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WorkspaceBundleError(
+            "workspace_state_unavailable",
+            "Jenkins lastBuild omitted a numeric build number",
+        ) from exc
+
+
+def _resolve_requested_build(
+    client: JenkinsClient,
+    job: str | list[str],
+    build: int | str,
+) -> int | None:
+    if str(build) == "lastBuild":
+        return None
+    build_info = client.get_json(
+        _build_path(job, build),
+        params={"tree": "number"},
+    )
+    if not isinstance(build_info, dict):
+        raise WorkspaceBundleError(
+            "workspace_build_resolution_failed",
+            "Jenkins build API response was not an object",
+        )
+    try:
+        return int(build_info["number"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WorkspaceBundleError(
+            "workspace_build_resolution_failed",
+            "Jenkins build API response did not include a numeric build number",
+        ) from exc
+
+
+def _require_current_build(desired_build: int | None, anchor_build: int) -> None:
+    if desired_build is not None and desired_build != anchor_build:
+        raise WorkspaceBundleError(
+            "workspace_build_not_current",
+            (
+                f"Requested build {desired_build}, but Jenkins' current stable workspace is "
+                f"anchored to build {anchor_build}; use archived artifacts for historical files"
+            ),
+        )
 
 
 def _deep_update(target: JsonDict, patch: JsonDict) -> None:
@@ -82,10 +343,19 @@ def _safe_name(value: str) -> str:
 
 
 def safe_job_name(job: str | list[str]) -> str:
+    pieces = _safe_job_path_parts(job)
+    return "__".join(pieces)
+
+
+def _safe_job_path_parts(job: str | list[str]) -> list[str]:
     pieces = [piece for piece in job.split("/") if piece] if isinstance(job, str) else job
     if not pieces:
         raise PathValidationError("job must include at least one path segment")
-    return "__".join(_safe_name(piece) for piece in pieces)
+    return [_safe_name(piece) for piece in pieces]
+
+
+def _workspace_job_dir(root: Path, job: str | list[str]) -> Path:
+    return root.joinpath(*_safe_job_path_parts(job))
 
 
 def normalize_workspace_path(workspace_path: str) -> str:
@@ -136,7 +406,9 @@ def _write_operation_index(
     cancel_path: Path,
 ) -> None:
     index_dir = operation_index_dir(root)
-    index_dir.mkdir(parents=True, exist_ok=True)
+    index_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with suppress(OSError):
+        index_dir.chmod(0o700)
     path = operation_index_path(root, operation_id)
     tmp = path.with_name(f"{path.name}.tmp")
     tmp.write_text(
@@ -269,9 +541,127 @@ def _refresh_or_recover_interrupted_operation(
     return _recover_interrupted_operation(root, refreshed, progress_path)
 
 
+def _registry_progress(root: Path, row: JsonDict) -> tuple[Path, JsonDict]:
+    progress_path = _path_under_root(root, str(row["progress_path"]), "progress_path")
+    if not progress_path.exists():
+        try:
+            request = json.loads(str(row.get("request_json", "{}")))
+        except json.JSONDecodeError:
+            request = {}
+        if not isinstance(request, dict):
+            request = {}
+        return progress_path, {
+            "operation_id": row["operation_id"],
+            "operation": request.get("operation"),
+            "job": request.get("job"),
+            "requested_build": request.get("build"),
+            "workspace_path": request.get("workspace_path"),
+            "kind": request.get("kind"),
+            "status": row["status"],
+            "phase": "starting_worker" if row["status"] == "running" else row["status"],
+            "output_dir": row.get("output_dir"),
+            "build_number": row.get("anchor_build_number"),
+            "created_at": _timestamp(),
+            "updated_at": _timestamp(),
+        }
+    try:
+        value = json.loads(progress_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkspaceBundleError(
+            "workspace_progress_invalid",
+            f"Progress data is invalid for operation {row['operation_id']}",
+        ) from exc
+    if not isinstance(value, dict):
+        raise WorkspaceBundleError(
+            "workspace_progress_invalid",
+            f"Progress data is not an object for operation {row['operation_id']}",
+        )
+    return progress_path, value
+
+
+def _remove_registry_output(root: Path, row: JsonDict, data: JsonDict) -> None:
+    raw_output = row.get("output_dir") or data.get("output_dir")
+    if not isinstance(raw_output, str):
+        return
+    output_dir = _path_under_root(root, raw_output, "output_dir")
+    if output_dir.is_symlink():
+        output_dir.unlink(missing_ok=True)
+    elif output_dir.exists():
+        shutil.rmtree(output_dir)
+
+
+def _mark_registry_progress_interrupted(
+    root: Path,
+    row: JsonDict,
+    progress_path: Path,
+    data: JsonDict,
+) -> JsonDict:
+    _remove_registry_output(root, row, data)
+    data.update(
+        {
+            "status": "failed",
+            "phase": "failed",
+            "error": {
+                "code": "workspace_operation_interrupted",
+                "message": "Detached workspace worker stopped before completing the operation",
+            },
+            "interrupted_at": _timestamp(),
+            "updated_at": _timestamp(),
+        }
+    )
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    ProgressFile(progress_path, data)
+    return data
+
+
+def _read_registry_status(
+    config: JenkinsConfig,
+    root: Path,
+    registry: WorkspaceOperationRegistry,
+    row: JsonDict,
+) -> JsonDict:
+    if row["status"] == "running" and float(row["heartbeat_at"]) < _stale_before(config):
+        refreshed = registry.mark_stale(str(row["operation_id"]), _stale_before(config))
+        if refreshed is not None:
+            row = refreshed
+
+    progress_path, data = _registry_progress(root, row)
+    if row["status"] == "failed" and row.get("error_code") == "workspace_operation_interrupted":
+        if data.get("status") == "running":
+            data = _mark_registry_progress_interrupted(root, row, progress_path, data)
+    else:
+        data["status"] = row["status"]
+        if row["status"] in TERMINAL_OPERATION_STATUSES and data.get("phase") not in {
+            "completed",
+            "failed",
+            "cancelled",
+        }:
+            data["phase"] = "completed" if row["status"] == "succeeded" else row["status"]
+            if row.get("error_code") and not isinstance(data.get("error"), dict):
+                data["error"] = {
+                    "code": row["error_code"],
+                    "message": "Detached workspace worker did not complete normally",
+                }
+
+    data["cancel_requested"] = bool(row["cancel_requested"])
+    data["worker_pid"] = row.get("worker_pid")
+    data["heartbeat_at_epoch"] = row.get("heartbeat_at")
+    if row.get("anchor_build_number") is not None:
+        data["build_number"] = row["anchor_build_number"]
+    if row.get("output_dir") is not None:
+        data["output_dir"] = row["output_dir"]
+    registry.touch(str(row["operation_id"]))
+    return data
+
+
 def read_workspace_bundle_status(operation_id: str) -> JsonDict:
     config = JenkinsConfig.from_env()
     root = config.require_workspace_download()
+    registry = WorkspaceOperationRegistry(root)
+    registered = registry.get(operation_id)
+    if registered is not None:
+        return _read_registry_status(config, root, registry, registered)
+
     index = _read_operation_index(root, operation_id)
     progress_path = _indexed_path(root, index, "progress_path")
     if not progress_path.exists():
@@ -280,35 +670,77 @@ def read_workspace_bundle_status(operation_id: str) -> JsonDict:
             f"Progress file is missing for operation {operation_id}",
         )
     data = json.loads(progress_path.read_text(encoding="utf-8"))
-    return _refresh_or_recover_interrupted_operation(
+    data = _refresh_or_recover_interrupted_operation(
         root,
         operation_id,
         index,
         data,
         progress_path,
     )
+    cancel_path = _indexed_path(root, index, "cancel_path")
+    data["cancel_requested"] = cancel_path.exists()
+    return data
 
 
 def cancel_workspace_bundle(operation_id: str) -> JsonDict:
     config = JenkinsConfig.from_env()
     root = config.require_workspace_download()
-    index = _read_operation_index(root, operation_id)
-    cancel_path = _indexed_path(root, index, "cancel_path")
-    cancel_path.write_text(_timestamp() + "\n", encoding="utf-8")
+    registry = WorkspaceOperationRegistry(root)
+    registered = registry.get(operation_id)
+    if registered is not None:
+        row = registry.request_cancel(operation_id)
+        cancel_requested = bool(
+            row is not None and row["status"] == "running" and row["cancel_requested"]
+        )
+        marker_written = False
+        if cancel_requested:
+            cancel_path = _path_under_root(root, str(registered["cancel_path"]), "cancel_path")
+            cancel_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                cancel_path.write_text(_timestamp() + "\n", encoding="utf-8")
+                marker_written = True
+            except OSError:
+                pass
+        return {
+            "operation_id": operation_id,
+            "cancel_requested": cancel_requested,
+            "cancel_marker_written": marker_written,
+            "status": row["status"] if row is not None else registered["status"],
+            "progress_path": registered["progress_path"],
+        }
 
+    index = _read_operation_index(root, operation_id)
     progress_path = _indexed_path(root, index, "progress_path")
     if progress_path.exists():
         data = json.loads(progress_path.read_text(encoding="utf-8"))
-        if data.get("status") == "running":
-            data["cancel_requested"] = True
-            data["updated_at"] = _timestamp()
-            tmp = progress_path.with_name(f"{progress_path.name}.tmp")
-            tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-            tmp.replace(progress_path)
+        status = data.get("status")
+        if status != "running":
+            return {
+                "operation_id": operation_id,
+                "cancel_requested": False,
+                "status": status,
+                "progress_path": str(progress_path),
+            }
+
+    cancel_path = _indexed_path(root, index, "cancel_path")
+    cancel_path.write_text(_timestamp() + "\n", encoding="utf-8")
+    status = "running" if progress_path.exists() else None
+    if progress_path.exists():
+        refreshed = json.loads(progress_path.read_text(encoding="utf-8"))
+        status = refreshed.get("status")
+        if status in {"succeeded", "failed"}:
+            cancel_path.unlink(missing_ok=True)
+            return {
+                "operation_id": operation_id,
+                "cancel_requested": False,
+                "status": status,
+                "progress_path": str(progress_path),
+            }
 
     return {
         "operation_id": operation_id,
         "cancel_requested": True,
+        "status": status,
         "progress_path": str(progress_path),
     }
 
@@ -324,6 +756,7 @@ def cleanup_workspace_bundle_operations(
 
     config = JenkinsConfig.from_env()
     root = config.require_workspace_download()
+    registry = WorkspaceOperationRegistry(root)
     index_dir = operation_index_dir(root)
     cutoff = time.time() - older_than_days * 24 * 60 * 60
     deleted: list[str] = []
@@ -334,7 +767,36 @@ def cleanup_workspace_bundle_operations(
     skipped_invalid = 0
     skipped_non_workspace = 0
 
-    for index_path in (sorted(index_dir.glob("*.json")) if index_dir.exists() else []):
+    for row in registry.cleanup_candidates(max_operations):
+        inspected_count += 1
+        operation_id = str(row["operation_id"])
+        try:
+            progress_path, data = _registry_progress(root, row)
+            if row["status"] == "running":
+                if float(row["heartbeat_at"]) >= _stale_before(config):
+                    skipped_running += 1
+                    continue
+                refreshed = registry.mark_stale(operation_id, _stale_before(config))
+                if refreshed is None:
+                    skipped_invalid += 1
+                    invalid.append(operation_id)
+                    continue
+                row = refreshed
+                data = _mark_registry_progress_interrupted(root, row, progress_path, data)
+            if float(row["last_accessed_at"]) > cutoff:
+                skipped_recent += 1
+                continue
+            _remove_registry_output(root, row, data)
+            operation_dir = _path_under_root(root, progress_path.parent, "operation directory")
+            if operation_dir.exists():
+                shutil.rmtree(operation_dir)
+            registry.delete(operation_id)
+            deleted.append(operation_id)
+        except OSError, WorkspaceBundleError:
+            skipped_invalid += 1
+            invalid.append(operation_id)
+
+    for index_path in sorted(index_dir.glob("*.json")) if index_dir.exists() else []:
         if inspected_count >= max_operations:
             break
         inspected_count += 1
@@ -383,7 +845,7 @@ def cleanup_workspace_bundle_operations(
             with _ACTIVE_OPERATIONS_LOCK:
                 _ACTIVE_OPERATIONS.pop(operation_id, None)
             deleted.append(operation_id)
-        except (OSError, json.JSONDecodeError, WorkspaceBundleError):
+        except OSError, json.JSONDecodeError, WorkspaceBundleError:
             skipped_invalid += 1
             invalid.append(operation_id)
 
@@ -401,91 +863,222 @@ def cleanup_workspace_bundle_operations(
     }
 
 
-def start_workspace_bundle_download(
+def _cached_payload_exists(root: Path, row: JsonDict) -> bool:
+    try:
+        _, data = _registry_progress(root, row)
+        if data.get("status") != "succeeded":
+            return False
+        required: list[tuple[Any, str]] = [
+            (data.get("console_log_path"), "file"),
+            (data.get("metadata_path"), "file"),
+        ]
+        if data.get("operation") == "workspace_bundle":
+            required.append((data.get("workspace_dir"), "directory"))
+        else:
+            kind = data.get("kind")
+            if kind not in {"file", "folder"}:
+                return False
+            required.append(
+                (data.get("target_path"), "file" if kind == "file" else "directory")
+            )
+        for raw, expected_type in required:
+            if not isinstance(raw, str):
+                return False
+            path = _path_under_root(root, raw, "cached payload path")
+            if path.is_symlink():
+                return False
+            if expected_type == "file" and not path.is_file():
+                return False
+            if expected_type == "directory" and not path.is_dir():
+                return False
+        return True
+    except OSError, WorkspaceBundleError:
+        return False
+
+
+def _start_response(
+    root: Path,
+    row: JsonDict,
+    *,
+    disposition: str,
+) -> JsonDict:
+    _, data = _registry_progress(root, row)
+    return {
+        "operation_id": row["operation_id"],
+        "job": data.get("job"),
+        "build_number": row.get("anchor_build_number") or data.get("build_number"),
+        "workspace_path": data.get("workspace_path"),
+        "kind": data.get("kind"),
+        "output_dir": row.get("output_dir") or data.get("output_dir"),
+        "progress_path": row["progress_path"],
+        "status": row["status"],
+        "phase": data.get("phase"),
+        "disposition": disposition,
+        "workspace_freshness": "best_effort",
+    }
+
+
+def _spawn_workspace_worker(operation_id: str) -> subprocess.Popen[bytes]:
+    command = [
+        sys.executable,
+        "-m",
+        "jenkins_mcp_server.workspace_worker",
+        operation_id,
+    ]
+    kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "posix":
+        kwargs["start_new_session"] = True
+    elif os.name == "nt":  # pragma: no cover - exercised on Windows CI/users.
+        kwargs["creationflags"] = (  # pragma: no cover
+            subprocess.CREATE_NEW_PROCESS_GROUP  # pragma: no cover
+            | subprocess.DETACHED_PROCESS  # pragma: no cover
+        )
+    return subprocess.Popen(command, **kwargs)
+
+
+def _start_workspace_operation(
+    *,
     job: str | list[str],
-    build: int | str = "lastBuild",
+    build: int | str,
+    operation: str,
+    workspace_path: str | None = None,
+    kind: str | None = None,
+    force_refresh: bool = False,
 ) -> JsonDict:
     config = JenkinsConfig.from_env()
     root = config.require_workspace_download()
-    operation_id = uuid.uuid4().hex
+    job_path(job)
+    request_identity: JsonDict = {
+        "operation": operation,
+        "job": job,
+        "build": build,
+        "workspace_path": workspace_path,
+        "kind": kind,
+    }
+    request_key = _request_key(config, request_identity)
+    registry = WorkspaceOperationRegistry(root)
+    active = registry.find_active(request_key)
+    if active is not None and float(active["heartbeat_at"]) >= _stale_before(config):
+        registry.touch(str(active["operation_id"]))
+        return _start_response(root, active, disposition="joined")
 
     with JenkinsClient(config) as client:
-        build_info = client.get_json(
-            f"{_build_path(job, build)}",
-            params={"tree": "number,url,fullDisplayName,result,building"},
-        )
+        initial_state = _probe_workspace_state(client, job)
+        desired_build = _resolve_requested_build(client, job, build)
+
+    if initial_state["stable"]:
+        initial_anchor = _state_anchor(initial_state)
+        _require_current_build(desired_build, initial_anchor)
+        if not force_refresh:
+            for reusable in registry.find_reusable(request_key, initial_anchor):
+                if _cached_payload_exists(root, reusable):
+                    registry.touch(str(reusable["operation_id"]))
+                    return _start_response(root, reusable, disposition="reused")
+                registry.invalidate_reusable(str(reusable["operation_id"]))
+
+    operation_id = uuid.uuid4().hex
+    operation_dir, progress_path, cancel_path = _operation_paths(root, operation_id)
+    request = {
+        **request_identity,
+        "desired_build_number": desired_build,
+        "initial_state": initial_state,
+    }
+    row, created, stale_rows = registry.claim_or_join(
+        operation_id=operation_id,
+        request_key=request_key,
+        request=request,
+        progress_path=progress_path,
+        cancel_path=cancel_path,
+        stale_before=_stale_before(config),
+    )
+    for stale in stale_rows:
+        stale_progress_path, stale_data = _registry_progress(root, stale)
+        _mark_registry_progress_interrupted(root, stale, stale_progress_path, stale_data)
+    if not created:
+        return _start_response(root, row, disposition="joined")
 
     try:
-        build_number = int(build_info["number"])
-    except (KeyError, TypeError, ValueError) as exc:
+        operation_dir.mkdir(parents=True, exist_ok=False)
+    except OSError as exc:
+        registry.fail_unowned_start(operation_id, "workspace_operation_setup_failed")
         raise WorkspaceBundleError(
-            "workspace_build_resolution_failed",
-            "Jenkins build API response did not include a numeric build number",
+            "workspace_operation_setup_failed",
+            "Could not create local workspace operation files",
         ) from exc
-    name_prefix = f"{safe_job_name(job)}{build_number}"
-    output_dir = _unique_output_dir(root, name_prefix, operation_id)
-    output_dir.mkdir(parents=True, exist_ok=False)
-
-    progress_path = output_dir / ".progress.json"
-    cancel_path = output_dir / ".cancel"
-    archive_path = output_dir / f"{name_prefix}.zip"
-    workspace_dir = output_dir / "workspace"
-    console_log_path = output_dir / f"{name_prefix}-console.log"
-    metadata_path = output_dir / "metadata.json"
-
+    with suppress(OSError):
+        operation_dir.chmod(0o700)
     progress = ProgressFile(
         progress_path,
         {
             "operation_id": operation_id,
-            "operation": "workspace_bundle",
+            "operation": operation,
             "status": "running",
-            "phase": "queued",
+            "phase": (
+                "checking_workspace_state"
+                if initial_state["stable"]
+                else _workspace_wait_phase(initial_state)
+            ),
             "job": job,
             "requested_build": build,
-            "build_number": build_number,
-            "build": build_info,
-            "output_dir": str(output_dir),
-            "archive_path": str(archive_path),
-            "workspace_dir": str(workspace_dir),
-            "console_log_path": str(console_log_path),
-            "metadata_path": str(metadata_path),
+            "desired_build_number": desired_build,
+            "build_number": None,
+            "workspace_path": workspace_path,
+            "kind": kind,
+            "output_dir": None,
             "cancel_requested": False,
             "created_at": _timestamp(),
             "updated_at": _timestamp(),
             "workspace_archive": {},
+            "workspace_file": {},
             "extract": {},
             "console_log": {},
+            "workspace_guard": {
+                "mode": "guarded_dynamic_workspace",
+                "freshness": "best_effort",
+                "build_identity_guaranteed": False,
+                "initial_state": initial_state,
+                "capture_attempt": 0,
+                "retry_count": 0,
+            },
         },
     )
-    _write_operation_index(root, operation_id, progress_path, cancel_path)
+    try:
+        worker = _spawn_workspace_worker(operation_id)
+        registry.set_spawned_pid(operation_id, worker.pid)
+    except Exception as exc:
+        registry.fail_unowned_start(operation_id, "workspace_worker_start_failed")
+        progress.update(
+            status="failed",
+            phase="failed",
+            error={
+                "code": "workspace_worker_start_failed",
+                "message": "Could not start detached workspace worker",
+                "type": type(exc).__name__,
+            },
+        )
+        raise WorkspaceBundleError(
+            "workspace_worker_start_failed",
+            "Could not start detached workspace worker",
+        ) from exc
+    return _start_response(root, registry.get(operation_id) or row, disposition="started")
 
-    thread = threading.Thread(
-        target=_run_workspace_bundle,
-        name=f"jenkins-workspace-bundle-{operation_id[:8]}",
-        daemon=True,
-        kwargs={
-            "config": config,
-            "job": job,
-            "build_number": build_number,
-            "name_prefix": name_prefix,
-            "archive_path": archive_path,
-            "workspace_dir": workspace_dir,
-            "console_log_path": console_log_path,
-            "metadata_path": metadata_path,
-            "progress": progress,
-            "cancel_path": cancel_path,
-        },
+
+def start_workspace_bundle_download(
+    job: str | list[str],
+    build: int | str = "lastBuild",
+    force_refresh: bool = False,
+) -> JsonDict:
+    return _start_workspace_operation(
+        job=job,
+        build=build,
+        operation="workspace_bundle",
+        force_refresh=force_refresh,
     )
-    _start_operation_thread(operation_id, thread)
-
-    return {
-        "operation_id": operation_id,
-        "job": job,
-        "build_number": build_number,
-        "output_dir": str(output_dir),
-        "progress_path": str(progress_path),
-        "status": "running",
-    }
 
 
 def start_workspace_path_download(
@@ -493,111 +1086,22 @@ def start_workspace_path_download(
     workspace_path: str,
     kind: str,
     build: int | str = "lastBuild",
+    force_refresh: bool = False,
 ) -> JsonDict:
     if kind not in {"file", "folder"}:
         raise WorkspaceBundleError(
             "invalid_workspace_path_kind",
             "kind must be either 'file' or 'folder'",
         )
-
     normalized_workspace_path = normalize_workspace_path(workspace_path)
-    config = JenkinsConfig.from_env()
-    root = config.require_workspace_download()
-    operation_id = uuid.uuid4().hex
-
-    with JenkinsClient(config) as client:
-        build_info = client.get_json(
-            f"{_build_path(job, build)}",
-            params={"tree": "number,url,fullDisplayName,result,building"},
-        )
-
-    try:
-        build_number = int(build_info["number"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise WorkspaceBundleError(
-            "workspace_build_resolution_failed",
-            "Jenkins build API response did not include a numeric build number",
-        ) from exc
-
-    name_prefix = f"{safe_job_name(job)}{build_number}"
-    output_dir = _unique_output_dir(root, name_prefix, operation_id)
-    output_dir.mkdir(parents=True, exist_ok=False)
-
-    progress_path = output_dir / ".progress.json"
-    cancel_path = output_dir / ".cancel"
-    workspace_root = output_dir / "workspace"
-    target_path = workspace_root.joinpath(*normalized_workspace_path.split("/"))
-    archive_path = output_dir / f"{name_prefix}-{_safe_name(normalized_workspace_path)}.zip"
-    console_log_path = output_dir / f"{name_prefix}-console.log"
-    metadata_path = output_dir / "metadata.json"
-
-    progress = ProgressFile(
-        progress_path,
-        {
-            "operation_id": operation_id,
-            "status": "running",
-            "phase": "queued",
-            "operation": "workspace_path_download",
-            "job": job,
-            "requested_build": build,
-            "build_number": build_number,
-            "build": build_info,
-            "workspace_path": normalized_workspace_path,
-            "kind": kind,
-            "output_dir": str(output_dir),
-            "workspace_dir": str(workspace_root),
-            "target_path": str(target_path),
-            "archive_path": str(archive_path) if kind == "folder" else None,
-            "console_log_path": str(console_log_path),
-            "metadata_path": str(metadata_path),
-            "cancel_requested": False,
-            "created_at": _timestamp(),
-            "updated_at": _timestamp(),
-            "workspace_file": {},
-            "workspace_archive": {},
-            "extract": {},
-            "console_log": {},
-        },
+    return _start_workspace_operation(
+        job=job,
+        build=build,
+        operation="workspace_path_download",
+        workspace_path=normalized_workspace_path,
+        kind=kind,
+        force_refresh=force_refresh,
     )
-    _write_operation_index(root, operation_id, progress_path, cancel_path)
-
-    thread = threading.Thread(
-        target=_run_workspace_path_download,
-        name=f"jenkins-workspace-path-{operation_id[:8]}",
-        daemon=True,
-        kwargs={
-            "config": config,
-            "job": job,
-            "build_number": build_number,
-            "workspace_path": normalized_workspace_path,
-            "kind": kind,
-            "archive_path": archive_path,
-            "target_path": target_path,
-            "console_log_path": console_log_path,
-            "metadata_path": metadata_path,
-            "progress": progress,
-            "cancel_path": cancel_path,
-        },
-    )
-    _start_operation_thread(operation_id, thread)
-
-    return {
-        "operation_id": operation_id,
-        "job": job,
-        "build_number": build_number,
-        "workspace_path": normalized_workspace_path,
-        "kind": kind,
-        "output_dir": str(output_dir),
-        "progress_path": str(progress_path),
-        "status": "running",
-    }
-
-
-def _unique_output_dir(root: Path, name_prefix: str, operation_id: str) -> Path:
-    candidate = root / name_prefix
-    if not candidate.exists():
-        return candidate
-    return root / f"{name_prefix}-{operation_id[:8]}"
 
 
 def _build_path(job: str | list[str], build: int | str) -> str:
@@ -626,6 +1130,459 @@ def _workspace_file_path(job: str | list[str], workspace_path: str) -> str:
     return f"{job_path(job)}/ws/{_encoded_workspace_path(workspace_path)}"
 
 
+def _reserve_output_dir(parent: Path, directory_name: str, operation_id: str) -> Path:
+    candidates = [
+        parent / directory_name,
+        parent / f"{directory_name}-{operation_id[:8]}",
+    ]
+    candidates.extend(
+        parent / f"{directory_name}-{operation_id[:8]}-{index}" for index in range(2, 100)
+    )
+    for candidate in candidates:
+        try:
+            candidate.mkdir(mode=0o700, parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise WorkspaceBundleError(
+        "workspace_output_reservation_failed",
+        f"Could not reserve an output directory for build {directory_name}",
+    )
+
+
+def _discard_output_dir(root: Path, output_dir: Path | None) -> None:
+    if output_dir is None:
+        return
+    safe = _path_under_root(root, output_dir, "output_dir")
+    if safe.is_symlink():
+        safe.unlink(missing_ok=True)
+    elif safe.exists():
+        shutil.rmtree(safe)
+
+
+def _configure_capture_paths(
+    *,
+    root: Path,
+    registry: WorkspaceOperationRegistry,
+    operation_id: str,
+    owner_id: str,
+    request: JsonDict,
+    anchor_build: int,
+    progress: ProgressFile,
+) -> JsonDict:
+    job = request["job"]
+    name_prefix = f"{safe_job_name(job)}{anchor_build}"
+    job_dir = _workspace_job_dir(root, job)
+    _path_under_root(root, job_dir, "job output directory")
+    job_dir.mkdir(parents=True, exist_ok=True)
+    _path_under_root(root, job_dir, "job output directory")
+    output_dir = _reserve_output_dir(job_dir, str(anchor_build), operation_id)
+    if not registry.set_capture(
+        operation_id,
+        owner_id,
+        output_dir=output_dir,
+        anchor_build_number=anchor_build,
+    ):
+        _discard_output_dir(root, output_dir)
+        raise OperationCancelledError("Workspace operation ownership was lost")
+
+    workspace_root = output_dir / "workspace"
+    console_log_path = output_dir / f"{name_prefix}-console.log"
+    metadata_path = output_dir / "metadata.json"
+    if request["operation"] == "workspace_bundle":
+        archive_path = output_dir / f"{name_prefix}.zip"
+        target_path = None
+    else:
+        workspace_path = str(request["workspace_path"])
+        target_path = workspace_root.joinpath(*workspace_path.split("/"))
+        archive_path = output_dir / f"{name_prefix}-{_safe_name(workspace_path)}.zip"
+
+    progress.update(
+        build_number=anchor_build,
+        output_dir=str(output_dir),
+        archive_path=(
+            str(archive_path)
+            if request["operation"] == "workspace_bundle" or request["kind"] == "folder"
+            else None
+        ),
+        workspace_dir=str(workspace_root),
+        target_path=str(target_path) if target_path is not None else None,
+        console_log_path=str(console_log_path),
+        metadata_path=str(metadata_path),
+        archive_deleted=False,
+        workspace_archive={},
+        workspace_file={},
+        extract={},
+        console_log={},
+    )
+    return {
+        "name_prefix": name_prefix,
+        "output_dir": output_dir,
+        "archive_path": archive_path,
+        "workspace_dir": workspace_root,
+        "target_path": target_path,
+        "console_log_path": console_log_path,
+        "metadata_path": metadata_path,
+    }
+
+
+def _sleep_with_cancel(seconds: float, cancel_check: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        _raise_if_cancelled(cancel_check)
+        time.sleep(min(0.25, max(deadline - time.monotonic(), 0.0)))
+
+
+def _worker_cancel_check(
+    registry: WorkspaceOperationRegistry,
+    operation_id: str,
+    owner_id: str,
+    cancel_path: Path,
+) -> Callable[[], bool]:
+    state = {"last_heartbeat": 0.0, "lost": False}
+
+    def cancelled() -> bool:
+        if state["lost"] or cancel_path.exists():
+            return True
+        now = time.monotonic()
+        if now - state["last_heartbeat"] >= WORKSPACE_HEARTBEAT_SECONDS:
+            state["last_heartbeat"] = now
+            if not registry.heartbeat(operation_id, owner_id):
+                state["lost"] = True
+                return True
+        return False
+
+    return cancelled
+
+
+def _wait_for_stable_workspace(
+    *,
+    client: JenkinsClient,
+    job: str | list[str],
+    progress: ProgressFile,
+    cancel_check: Callable[[], bool],
+) -> JsonDict:
+    checks = 0
+    while True:
+        _raise_if_cancelled(cancel_check)
+        state = _probe_workspace_state(client, job)
+        checks += 1
+        progress.update(
+            phase="checking_workspace_state" if state["stable"] else _workspace_wait_phase(state),
+            workspace_guard={
+                "last_state": state,
+                "state_checks": checks,
+            },
+        )
+        if state["stable"]:
+            return state
+        _sleep_with_cancel(WORKSPACE_STATE_POLL_SECONDS, cancel_check)
+
+
+def _operation_is_owned(
+    registry: WorkspaceOperationRegistry,
+    operation_id: str,
+    owner_id: str,
+) -> bool:
+    row = registry.get(operation_id)
+    return row is not None and row["status"] == "running" and row["owner_id"] == owner_id
+
+
+def _finish_registered_operation(
+    *,
+    registry: WorkspaceOperationRegistry,
+    operation_id: str,
+    owner_id: str,
+    progress: ProgressFile,
+    status: str,
+    phase: str,
+    error: JsonDict | None = None,
+    **extra: Any,
+) -> None:
+    if not _operation_is_owned(registry, operation_id, owner_id):
+        return
+    patch: JsonDict = {"status": status, "phase": phase, **extra}
+    if error is not None:
+        patch["error"] = error
+    progress.update(**patch)
+    registry.finish(
+        operation_id,
+        owner_id,
+        status,
+        error_code=error.get("code") if error is not None else None,
+    )
+
+
+def run_registered_workspace_operation(
+    config: JenkinsConfig,
+    registry: WorkspaceOperationRegistry,
+    row: JsonDict,
+    owner_id: str,
+) -> None:
+    operation_id = str(row["operation_id"])
+    root = registry.root
+    progress_path = _path_under_root(root, str(row["progress_path"]), "progress_path")
+    cancel_path = _path_under_root(root, str(row["cancel_path"]), "cancel_path")
+    progress_data = json.loads(progress_path.read_text(encoding="utf-8"))
+    if not isinstance(progress_data, dict):
+        raise WorkspaceBundleError(
+            "workspace_progress_invalid",
+            f"Progress data is not an object for operation {operation_id}",
+        )
+    progress = ProgressFile(progress_path, progress_data)
+    request = registry.request(row)
+    job = request.get("job")
+    if not isinstance(job, (str, list)):
+        raise WorkspaceBundleError(
+            "workspace_operation_request_invalid",
+            "Workspace operation request omitted job",
+        )
+    job_path(job)
+    desired_build = request.get("desired_build_number")
+    if desired_build is not None:
+        try:
+            desired_build = int(desired_build)
+        except (TypeError, ValueError) as exc:
+            raise WorkspaceBundleError(
+                "workspace_operation_request_invalid",
+                "Workspace operation request has an invalid desired build",
+            ) from exc
+
+    cancel_check = _worker_cancel_check(
+        registry,
+        operation_id,
+        owner_id,
+        cancel_path,
+    )
+    output_dir: Path | None = None
+    try:
+        with JenkinsClient(config) as state_client:
+            for attempt in range(1, WORKSPACE_CAPTURE_MAX_ATTEMPTS + 1):
+                stable_state = _wait_for_stable_workspace(
+                    client=state_client,
+                    job=job,
+                    progress=progress,
+                    cancel_check=cancel_check,
+                )
+                anchor_build = _state_anchor(stable_state)
+                _require_current_build(desired_build, anchor_build)
+                paths = _configure_capture_paths(
+                    root=root,
+                    registry=registry,
+                    operation_id=operation_id,
+                    owner_id=owner_id,
+                    request=request,
+                    anchor_build=anchor_build,
+                    progress=progress,
+                )
+                output_dir = paths["output_dir"]
+                guard_metadata: JsonDict = {
+                    "mode": "guarded_dynamic_workspace",
+                    "freshness": "best_effort",
+                    "build_identity_guaranteed": False,
+                    "anchor_build_number": anchor_build,
+                    "pre_download_state": stable_state,
+                    "capture_attempt": attempt,
+                    "retry_count": attempt - 1,
+                }
+                progress.update(workspace_guard=guard_metadata)
+
+                def state_check(
+                    anchor: int = anchor_build,
+                    metadata: JsonDict = guard_metadata,
+                ) -> JsonDict:
+                    _raise_if_cancelled(cancel_check)
+                    current = _probe_workspace_state(state_client, job)
+                    metadata["last_checked_state"] = current
+                    progress.update(workspace_guard=metadata)
+                    if not current["stable"] or _state_anchor(current) != anchor:
+                        raise _WorkspaceStateChanged(current)
+                    metadata["post_download_state"] = current
+                    return current
+
+                try:
+                    state_check()
+                    metadata_extra = {"workspace_guard": guard_metadata}
+                    if request["operation"] == "workspace_bundle":
+                        metadata = _capture_workspace_bundle(
+                            config=config,
+                            job=job,
+                            build_number=anchor_build,
+                            name_prefix=str(paths["name_prefix"]),
+                            archive_path=paths["archive_path"],
+                            workspace_dir=paths["workspace_dir"],
+                            console_log_path=paths["console_log_path"],
+                            metadata_path=paths["metadata_path"],
+                            progress=progress,
+                            cancel_path=cancel_path,
+                            cancel_check=cancel_check,
+                            state_check=state_check,
+                            metadata_extra=metadata_extra,
+                        )
+                    else:
+                        metadata = _capture_workspace_path_download(
+                            config=config,
+                            job=job,
+                            build_number=anchor_build,
+                            workspace_path=str(request["workspace_path"]),
+                            kind=str(request["kind"]),
+                            archive_path=paths["archive_path"],
+                            target_path=paths["target_path"],
+                            console_log_path=paths["console_log_path"],
+                            metadata_path=paths["metadata_path"],
+                            progress=progress,
+                            cancel_path=cancel_path,
+                            cancel_check=cancel_check,
+                            state_check=state_check,
+                            metadata_extra=metadata_extra,
+                        )
+                    _finish_registered_operation(
+                        registry=registry,
+                        operation_id=operation_id,
+                        owner_id=owner_id,
+                        progress=progress,
+                        status="succeeded",
+                        phase="completed",
+                        metadata_path=str(paths["metadata_path"]),
+                        completed_at=metadata["completed_at"],
+                    )
+                    return
+                except _WorkspaceStateChanged as exc:
+                    _discard_output_dir(root, output_dir)
+                    registry.clear_capture(operation_id, owner_id)
+                    output_dir = None
+                    if attempt >= WORKSPACE_CAPTURE_MAX_ATTEMPTS:
+                        raise WorkspaceBundleError(
+                            "workspace_changed_during_download",
+                            "Jenkins workspace changed during both capture attempts",
+                        ) from exc
+                    progress.update(
+                        phase="workspace_changed_retrying",
+                        output_dir=None,
+                        workspace_guard={
+                            "last_state": exc.state,
+                            "retry_count": attempt,
+                        },
+                    )
+    except OperationCancelledError as exc:
+        _discard_output_dir(root, output_dir)
+        registry.clear_capture(operation_id, owner_id)
+        _finish_registered_operation(
+            registry=registry,
+            operation_id=operation_id,
+            owner_id=owner_id,
+            progress=progress,
+            status="cancelled",
+            phase="cancelled",
+            error={"code": exc.code, "message": str(exc)},
+            cancel_requested=True,
+            output_dir=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - detached worker must persist failures.
+        _discard_output_dir(root, output_dir)
+        registry.clear_capture(operation_id, owner_id)
+        _finish_registered_operation(
+            registry=registry,
+            operation_id=operation_id,
+            owner_id=owner_id,
+            progress=progress,
+            status="failed",
+            phase="failed",
+            error=_error_payload(exc, str(progress.data.get("phase", ""))),
+            output_dir=None,
+        )
+
+
+def _write_json_atomic(path: Path, data: JsonDict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _capture_workspace_bundle(
+    *,
+    config: JenkinsConfig,
+    job: str | list[str],
+    build_number: int,
+    name_prefix: str,
+    archive_path: Path,
+    workspace_dir: Path,
+    console_log_path: Path,
+    metadata_path: Path,
+    progress: ProgressFile,
+    cancel_path: Path,
+    cancel_check: Callable[[], bool] | None = None,
+    state_check: Callable[[], JsonDict] | None = None,
+    metadata_extra: JsonDict | None = None,
+) -> JsonDict:
+    archive_partial = archive_path.with_suffix(f"{archive_path.suffix}.partial")
+    workspace_partial = workspace_dir.with_name(f"{workspace_dir.name}.partial")
+    log_partial = console_log_path.with_suffix(f"{console_log_path.suffix}.partial")
+
+    def cancelled() -> bool:
+        return cancel_path.exists() or (cancel_check is not None and cancel_check())
+
+    with JenkinsClient(config) as client:
+        _download_with_progress(
+            client=client,
+            source_path=_workspace_archive_path(job, archive_path.name),
+            partial_path=archive_partial,
+            final_path=archive_path,
+            max_bytes=config.max_workspace_archive_bytes,
+            progress=progress,
+            progress_key="workspace_archive",
+            phase="downloading_workspace_archive",
+            cancel_check=cancelled,
+            interval_seconds=config.workspace_progress_interval_seconds,
+            state_check=state_check,
+        )
+
+        _raise_if_cancelled(cancelled)
+        _extract_zip_safely(
+            archive_path=archive_path,
+            partial_dir=workspace_partial,
+            final_dir=workspace_dir,
+            max_bytes=config.max_workspace_extract_bytes,
+            max_files=config.max_workspace_files,
+            progress=progress,
+            cancel_check=cancelled,
+            interval_seconds=config.workspace_progress_interval_seconds,
+        )
+
+        archive_path.unlink(missing_ok=True)
+        progress.update(archive_deleted=True)
+
+        _download_with_progress(
+            client=client,
+            source_path=f"{_build_path(job, build_number)}/consoleText",
+            partial_path=log_partial,
+            final_path=console_log_path,
+            max_bytes=config.max_bundle_log_bytes,
+            progress=progress,
+            progress_key="console_log",
+            phase="downloading_console_log",
+            cancel_check=cancelled,
+            interval_seconds=config.workspace_progress_interval_seconds,
+        )
+
+    metadata = {
+        "job": job,
+        "build_number": build_number,
+        "archive_deleted": True,
+        "workspace_dir": str(workspace_dir),
+        "console_log_path": str(console_log_path),
+        "completed_at": _timestamp(),
+    }
+    if metadata_extra:
+        _deep_update(metadata, metadata_extra)
+    _write_json_atomic(metadata_path, metadata)
+    return metadata
+
+
 def _run_workspace_bundle(
     *,
     config: JenkinsConfig,
@@ -642,62 +1599,19 @@ def _run_workspace_bundle(
     archive_partial = archive_path.with_suffix(f"{archive_path.suffix}.partial")
     workspace_partial = workspace_dir.with_name(f"{workspace_dir.name}.partial")
     log_partial = console_log_path.with_suffix(f"{console_log_path.suffix}.partial")
-
-    def cancelled() -> bool:
-        return cancel_path.exists()
-
     try:
-        with JenkinsClient(config) as client:
-            _download_with_progress(
-                client=client,
-                source_path=_workspace_archive_path(job, archive_path.name),
-                partial_path=archive_partial,
-                final_path=archive_path,
-                max_bytes=config.max_workspace_archive_bytes,
-                progress=progress,
-                progress_key="workspace_archive",
-                phase="downloading_workspace_archive",
-                cancel_check=cancelled,
-                interval_seconds=config.workspace_progress_interval_seconds,
-            )
-
-            _raise_if_cancelled(cancelled)
-            _extract_zip_safely(
-                archive_path=archive_path,
-                partial_dir=workspace_partial,
-                final_dir=workspace_dir,
-                max_bytes=config.max_workspace_extract_bytes,
-                max_files=config.max_workspace_files,
-                progress=progress,
-                cancel_check=cancelled,
-                interval_seconds=config.workspace_progress_interval_seconds,
-            )
-
-            archive_path.unlink(missing_ok=True)
-            progress.update(archive_deleted=True)
-
-            _download_with_progress(
-                client=client,
-                source_path=f"{_build_path(job, build_number)}/consoleText",
-                partial_path=log_partial,
-                final_path=console_log_path,
-                max_bytes=config.max_bundle_log_bytes,
-                progress=progress,
-                progress_key="console_log",
-                phase="downloading_console_log",
-                cancel_check=cancelled,
-                interval_seconds=config.workspace_progress_interval_seconds,
-            )
-
-        metadata = {
-            "job": job,
-            "build_number": build_number,
-            "archive_deleted": True,
-            "workspace_dir": str(workspace_dir),
-            "console_log_path": str(console_log_path),
-            "completed_at": _timestamp(),
-        }
-        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        metadata = _capture_workspace_bundle(
+            config=config,
+            job=job,
+            build_number=build_number,
+            name_prefix=name_prefix,
+            archive_path=archive_path,
+            workspace_dir=workspace_dir,
+            console_log_path=console_log_path,
+            metadata_path=metadata_path,
+            progress=progress,
+            cancel_path=cancel_path,
+        )
         progress.update(
             status="succeeded",
             phase="completed",
@@ -725,6 +1639,107 @@ def _run_workspace_bundle(
         _forget_operation_thread(str(progress.data["operation_id"]))
 
 
+def _capture_workspace_path_download(
+    *,
+    config: JenkinsConfig,
+    job: str | list[str],
+    build_number: int,
+    workspace_path: str,
+    kind: str,
+    archive_path: Path,
+    target_path: Path,
+    console_log_path: Path,
+    metadata_path: Path,
+    progress: ProgressFile,
+    cancel_path: Path,
+    cancel_check: Callable[[], bool] | None = None,
+    state_check: Callable[[], JsonDict] | None = None,
+    metadata_extra: JsonDict | None = None,
+) -> JsonDict:
+    archive_partial = _partial_path(archive_path)
+    target_partial = _partial_path(target_path)
+    folder_partial = _partial_path(target_path)
+    log_partial = _partial_path(console_log_path)
+
+    def cancelled() -> bool:
+        return cancel_path.exists() or (cancel_check is not None and cancel_check())
+
+    with JenkinsClient(config) as client:
+        if kind == "file":
+            _download_with_progress(
+                client=client,
+                source_path=_workspace_file_path(job, workspace_path),
+                partial_path=target_partial,
+                final_path=target_path,
+                max_bytes=config.max_workspace_archive_bytes,
+                progress=progress,
+                progress_key="workspace_file",
+                phase="downloading_workspace_file",
+                cancel_check=cancelled,
+                interval_seconds=config.workspace_progress_interval_seconds,
+                state_check=state_check,
+            )
+        else:
+            _download_with_progress(
+                client=client,
+                source_path=_workspace_folder_archive_path(
+                    job,
+                    workspace_path,
+                    archive_path.name,
+                ),
+                partial_path=archive_partial,
+                final_path=archive_path,
+                max_bytes=config.max_workspace_archive_bytes,
+                progress=progress,
+                progress_key="workspace_archive",
+                phase="downloading_workspace_archive",
+                cancel_check=cancelled,
+                interval_seconds=config.workspace_progress_interval_seconds,
+                state_check=state_check,
+            )
+            _raise_if_cancelled(cancelled)
+            _extract_zip_safely(
+                archive_path=archive_path,
+                partial_dir=folder_partial,
+                final_dir=target_path,
+                max_bytes=config.max_workspace_extract_bytes,
+                max_files=config.max_workspace_files,
+                progress=progress,
+                cancel_check=cancelled,
+                interval_seconds=config.workspace_progress_interval_seconds,
+            )
+            archive_path.unlink(missing_ok=True)
+            progress.update(archive_deleted=True)
+
+        _download_with_progress(
+            client=client,
+            source_path=f"{_build_path(job, build_number)}/consoleText",
+            partial_path=log_partial,
+            final_path=console_log_path,
+            max_bytes=config.max_bundle_log_bytes,
+            progress=progress,
+            progress_key="console_log",
+            phase="downloading_console_log",
+            cancel_check=cancelled,
+            interval_seconds=config.workspace_progress_interval_seconds,
+        )
+
+    metadata = {
+        "job": job,
+        "build_number": build_number,
+        "kind": kind,
+        "workspace_path": workspace_path,
+        "target_path": str(target_path),
+        "archive_deleted": kind == "folder",
+        "console_log_path": str(console_log_path),
+        "completed_at": _timestamp(),
+    }
+    if metadata_extra:
+        _deep_update(metadata, metadata_extra)
+    _write_json_atomic(metadata_path, metadata)
+    return metadata
+
+
 def _run_workspace_path_download(
     *,
     config: JenkinsConfig,
@@ -743,80 +1758,20 @@ def _run_workspace_path_download(
     target_partial = _partial_path(target_path)
     folder_partial = _partial_path(target_path)
     log_partial = _partial_path(console_log_path)
-
-    def cancelled() -> bool:
-        return cancel_path.exists()
-
     try:
-        with JenkinsClient(config) as client:
-            if kind == "file":
-                _download_with_progress(
-                    client=client,
-                    source_path=_workspace_file_path(job, workspace_path),
-                    partial_path=target_partial,
-                    final_path=target_path,
-                    max_bytes=config.max_workspace_archive_bytes,
-                    progress=progress,
-                    progress_key="workspace_file",
-                    phase="downloading_workspace_file",
-                    cancel_check=cancelled,
-                    interval_seconds=config.workspace_progress_interval_seconds,
-                )
-            else:
-                _download_with_progress(
-                    client=client,
-                    source_path=_workspace_folder_archive_path(
-                        job,
-                        workspace_path,
-                        archive_path.name,
-                    ),
-                    partial_path=archive_partial,
-                    final_path=archive_path,
-                    max_bytes=config.max_workspace_archive_bytes,
-                    progress=progress,
-                    progress_key="workspace_archive",
-                    phase="downloading_workspace_archive",
-                    cancel_check=cancelled,
-                    interval_seconds=config.workspace_progress_interval_seconds,
-                )
-                _raise_if_cancelled(cancelled)
-                _extract_zip_safely(
-                    archive_path=archive_path,
-                    partial_dir=folder_partial,
-                    final_dir=target_path,
-                    max_bytes=config.max_workspace_extract_bytes,
-                    max_files=config.max_workspace_files,
-                    progress=progress,
-                    cancel_check=cancelled,
-                    interval_seconds=config.workspace_progress_interval_seconds,
-                )
-                archive_path.unlink(missing_ok=True)
-                progress.update(archive_deleted=True)
-
-            _download_with_progress(
-                client=client,
-                source_path=f"{_build_path(job, build_number)}/consoleText",
-                partial_path=log_partial,
-                final_path=console_log_path,
-                max_bytes=config.max_bundle_log_bytes,
-                progress=progress,
-                progress_key="console_log",
-                phase="downloading_console_log",
-                cancel_check=cancelled,
-                interval_seconds=config.workspace_progress_interval_seconds,
-            )
-
-        metadata = {
-            "job": job,
-            "build_number": build_number,
-            "kind": kind,
-            "workspace_path": workspace_path,
-            "target_path": str(target_path),
-            "archive_deleted": kind == "folder",
-            "console_log_path": str(console_log_path),
-            "completed_at": _timestamp(),
-        }
-        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        metadata = _capture_workspace_path_download(
+            config=config,
+            job=job,
+            build_number=build_number,
+            workspace_path=workspace_path,
+            kind=kind,
+            archive_path=archive_path,
+            target_path=target_path,
+            console_log_path=console_log_path,
+            metadata_path=metadata_path,
+            progress=progress,
+            cancel_path=cancel_path,
+        )
         progress.update(
             status="succeeded",
             phase="completed",
@@ -856,11 +1811,14 @@ def _download_with_progress(
     phase: str,
     cancel_check: Callable[[], bool],
     interval_seconds: float,
+    state_check: Callable[[], JsonDict] | None = None,
+    state_check_interval_seconds: float = WORKSPACE_STATE_POLL_SECONDS,
 ) -> None:
     partial_path.unlink(missing_ok=True)
     final_path.unlink(missing_ok=True)
     start = time.monotonic()
     last_update = 0.0
+    last_state_check = start
 
     progress.update(
         phase=phase,
@@ -869,8 +1827,11 @@ def _download_with_progress(
     )
 
     def on_progress(downloaded: int, total: int | None) -> None:
-        nonlocal last_update
+        nonlocal last_state_check, last_update
         now = time.monotonic()
+        if state_check is not None and now - last_state_check >= state_check_interval_seconds:
+            state_check()
+            last_state_check = time.monotonic()
         if now - last_update < interval_seconds and (total is None or downloaded != total):
             return
         last_update = now
@@ -883,6 +1844,8 @@ def _download_with_progress(
         progress_callback=on_progress,
         cancel_check=cancel_check,
     )
+    if state_check is not None:
+        state_check()
     partial_path.replace(final_path)
     progress.update(**{progress_key: {"path": str(final_path), "complete": True}})
 
