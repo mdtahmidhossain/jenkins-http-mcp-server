@@ -1,17 +1,6 @@
 # Releasing
 
-The distribution name is `jenkins-http-mcp-server`. The shorter
-`jenkins-mcp-server` name is owned by an unrelated PyPI project; this was verified through PyPI's
-JSON API on 2026-08-30.
-
-## One-Time Setup
-
-1. Create the `jenkins-http-mcp-server` project on PyPI, or configure a pending publisher.
-2. Add a PyPI trusted publisher for GitHub repository
-   `mdtahmidhossain/jenkins-http-mcp-server`, workflow `release.yml`, environment `pypi`.
-3. Create a protected GitHub environment named `pypi` and require review if appropriate.
-
-The workflow uses OIDC trusted publishing and stores no PyPI API token.
+Releases are GitHub Releases only. This project does not publish packages to PyPI.
 
 ## Release
 
@@ -27,7 +16,6 @@ ruff check
 python -m pip install -e '.[dev,release]'
 rm -rf build dist
 python -m build
-python -m twine check dist/*
 ```
 
 4. Commit the release, then create and push an annotated matching tag:
@@ -39,8 +27,8 @@ git push origin v0.2.0
 ```
 
 The release workflow verifies that the tag, project version, and module version match. It runs
-lint, compilation, and the full test suite before building and checking both distributions,
-publishes through the `pypi` environment, and creates a GitHub release only after PyPI succeeds.
+lint, compilation, and the full test suite before building both distributions and attaching them to
+a GitHub release. It does not publish to PyPI.
 
 ## Repository Metadata
 

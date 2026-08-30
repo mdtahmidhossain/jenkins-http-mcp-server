@@ -18,7 +18,7 @@ All notable changes are documented here.
 - Refresh Python 3.14.7, Codex environment forwarding, Gemini token forwarding, and Agent Skills
   documentation against current official sources.
 - Depend on the MCP SDK without its unused CLI extra.
-- Add MIT licensing, security policy, package metadata, and trusted PyPI release automation.
+- Add MIT licensing, security policy, and package metadata.
 
 ## 0.1.0 - 2026-05-06
 

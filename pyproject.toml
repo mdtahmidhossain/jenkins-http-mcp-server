@@ -34,7 +34,6 @@ dev = [
 ]
 release = [
   "build>=1.2",
-  "twine>=6.1",
 ]
 
 [project.urls]

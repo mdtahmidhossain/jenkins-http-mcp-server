@@ -277,9 +277,9 @@ enforces 100% source line coverage locally and in CI.
 
 ## Releases
 
-The package distribution name is `jenkins-http-mcp-server`. Release builds and tokenless PyPI
-trusted publishing are documented in `docs/releasing.md`. The source is licensed under the MIT
-License; see `LICENSE` and `SECURITY.md`.
+Optional tag-based GitHub Releases are documented in `docs/releasing.md`. Release artifacts are
+attached to GitHub and are not published to PyPI. The source is licensed under the MIT License; see
+`LICENSE` and `SECURITY.md`.
 
 Optional integration tests only run when all are set:
 
