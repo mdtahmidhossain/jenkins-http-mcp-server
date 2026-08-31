@@ -7,13 +7,16 @@
 [![Jenkins 2.579](https://img.shields.io/badge/Jenkins-2.579-D24939?logo=jenkins&logoColor=white)](docs/source-truth.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Connect Codex CLI or Gemini CLI to Jenkins through normal Jenkins HTTP APIs. The server is external,
-read-only by default, and limited to the permissions of your Jenkins user and API token.
+![Jenkins HTTP MCP Server: Jenkins automation for Codex CLI and Gemini CLI](.github/assets/social-preview.png)
+
+An external Python Model Context Protocol (MCP) server for Jenkins that uses standard Jenkins HTTP
+APIs. It works with Codex CLI and Gemini CLI, defaults to read-only, and requires neither Jenkins
+administrator access nor plugin installation.
 
 > [!IMPORTANT]
-> This project does not require Jenkins administrator access, install a Jenkins plugin, or depend on
-> the official Jenkins MCP Server Plugin. Its endpoint behavior is source-validated against Jenkins
-> 2.579.
+> This project does not require Jenkins administrator access or plugin installation and does not
+> depend on the official Jenkins MCP Server Plugin. Its endpoint behavior is source-validated
+> against Jenkins 2.579.
 
 [Quick start](#quick-start) | [Client setup](#client-setup) | [Tools](#tools) |
 [Downloads](#workspace-logs-and-artifacts) | [Safety](#safety-model) |

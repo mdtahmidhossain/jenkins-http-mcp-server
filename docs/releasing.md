@@ -37,11 +37,25 @@ After authenticating GitHub CLI, set the public description and topics once:
 ```bash
 gh auth login
 gh repo edit mdtahmidhossain/jenkins-http-mcp-server \
-  --description "External Python MCP server for Jenkins 2.579 using normal HTTP APIs, with safe local downloads and gated writes." \
+  --description "External Python Model Context Protocol (MCP) server for Jenkins HTTP APIs. Read-only by default; supports Codex CLI and Gemini CLI without Jenkins admin access or plugins." \
   --add-topic jenkins \
+  --add-topic jenkins-api \
+  --add-topic jenkins-mcp \
   --add-topic mcp \
+  --add-topic mcp-server \
+  --add-topic model-context-protocol \
   --add-topic python \
+  --add-topic devops \
+  --add-topic continuous-integration \
+  --add-topic build-automation \
   --add-topic codex \
+  --add-topic codex-cli \
   --add-topic gemini-cli \
-  --add-topic ci-cd
+  --add-topic ci-cd \
+  --add-topic agent-skills \
+  --add-topic stdio
 ```
+
+The tracked social-preview source is `.github/assets/social-preview.png`. After changing it, upload
+that file under the repository's **Settings > Social preview** control. GitHub does not expose a
+supported social-preview upload through its REST or GraphQL repository update APIs.
