@@ -100,6 +100,10 @@ only the method and normalized relative Jenkins path. Transient GET failures use
 attempts with short backoff. POST requests are not automatically retried; the only POST replay is the
 existing one-time crumb refresh after Jenkins explicitly returns a crumb-related 403.
 
+HTTPX-decoded bounded responses are rebuilt without stale `Content-Encoding`, `Content-Length`, or
+`Transfer-Encoding` metadata. This prevents JSON endpoints such as `whoAmI` from trying to decode an
+already-decoded gzip body again while preserving Jenkins application headers.
+
 File downloads request `Accept-Encoding: identity` and reject responses with an HTTP
 `Content-Encoding`. This prevents an HTTP gzip content-coding layer from wrapping ZIP or other file
 content and keeps `Content-Length`, progress, disk preflight, size limits, and bytes written

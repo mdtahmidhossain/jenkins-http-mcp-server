@@ -214,9 +214,13 @@ class JenkinsClient:
 
     @staticmethod
     def _detached_response(response: httpx.Response, content: bytes) -> httpx.Response:
+        headers = response.headers.copy()
+        headers.pop("Content-Encoding", None)
+        headers.pop("Content-Length", None)
+        headers.pop("Transfer-Encoding", None)
         return httpx.Response(
             response.status_code,
-            headers=response.headers,
+            headers=headers,
             content=content,
             request=response.request,
             extensions=response.extensions,

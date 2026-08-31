@@ -20,6 +20,7 @@ All notable changes are documented here.
 - Depend on the MCP SDK without its unused CLI extra.
 - Add MIT licensing, security policy, and package metadata.
 - Prevent HTTP content coding from wrapping file downloads and invalidating byte accounting.
+- Prevent bounded JSON responses such as `whoAmI` from being decompressed twice.
 
 ## 0.1.0 - 2026-05-06
 

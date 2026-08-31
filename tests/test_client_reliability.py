@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import gzip
 import ssl
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,6 +64,48 @@ def test_bounded_response_stops_before_reading_the_full_body() -> None:
         client.get_text("api/json")
 
     assert stream.read_count == 2
+
+
+@pytest.mark.parametrize(("content_encoding", "layers"), [("gzip", 1), ("gzip, gzip", 2)])
+def test_bounded_whoami_response_is_not_decoded_twice(
+    content_encoding: str,
+    layers: int,
+) -> None:
+    payload = b'{"name":"alice","authenticated":true}'
+    encoded = payload
+    for _ in range(layers):
+        encoded = gzip.compress(encoded)
+
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        assert request.url.path == "/whoAmI/api/json"
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Encoding": content_encoding,
+            "X-Jenkins": "2.579",
+        }
+        if layers == 1:
+            headers["Content-Length"] = str(len(encoded))
+        else:
+            headers["Transfer-Encoding"] = "chunked"
+        return httpx.Response(
+            200,
+            headers=headers,
+            stream=_Chunks([encoded]),
+        )
+
+    with JenkinsClient(_config(), transport=httpx.MockTransport(handler)) as client:
+        response = client.request("GET", "whoAmI/api/json")
+
+    assert response.json() == {"name": "alice", "authenticated": True}
+    assert response.headers["X-Jenkins"] == "2.579"
+    assert response.headers["Content-Length"] == str(len(payload))
+    assert "Content-Encoding" not in response.headers
+    assert "Transfer-Encoding" not in response.headers
+    assert requests == 1
 
 
 def test_disk_space_preflight_reports_required_and_available(
