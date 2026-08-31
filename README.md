@@ -263,7 +263,8 @@ Delete additionally requires `JENKINS_MCP_ENABLE_DELETE=1`:
 
 ## Testing
 
-Normal tests are mocked and do not require a live Jenkins controller:
+Normal tests use mocks or a local fake Jenkins controller and do not require a live Jenkins
+controller:
 
 ```bash
 python -m pytest
@@ -274,6 +275,12 @@ ruff check
 `python -m pytest` reports missing lines in the terminal and writes `coverage.xml`.
 GitHub Actions also publishes the coverage table in the workflow run summary. The test command
 enforces 100% source line coverage locally and in CI.
+
+`tests/test_mcp_stdio_e2e.py` starts the real MCP server as a subprocess, connects with the official
+MCP Python client over STDIO, calls every registered tool, reads the safety resource, and verifies
+the resulting HTTP requests against a deterministic local Jenkins fixture. It covers compressed
+responses, Basic authentication, crumbs, safety gates, common HTTP errors, workspace captures, and
+artifact downloads without performing live Jenkins writes.
 
 ## Releases
 

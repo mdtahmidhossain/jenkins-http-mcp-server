@@ -11,7 +11,8 @@ Maintain the MCP server with source evidence and conservative permissions.
 
 1. Add no Jenkins feature without evidence from the exact Jenkins tag recorded in `docs/source-truth.md` or official Jenkins documentation.
 2. Update `docs/tool-evidence.md` for every tool addition or endpoint change.
-3. Add mocked unit tests for every tool and safety behavior. Normal tests must not require a live Jenkins server.
+3. Add mocked unit tests for every tool and safety behavior. Keep the real STDIO MCP call matrix in
+   `tests/test_mcp_stdio_e2e.py` complete. Normal tests must not require a live Jenkins server.
 4. Preserve safety gates. Do not broaden writes, job config writes, deletes, or dangerous/admin-like behavior silently.
 5. Keep default mode read-only.
 6. Do not add plugin-dependent assumptions. Mark plugin-dependent endpoints clearly and make 404/403 failures explicit.
@@ -34,7 +35,8 @@ Maintain the MCP server with source evidence and conservative permissions.
 1. Inspect `vendor/jenkins` at the exact tag recorded in `docs/source-truth.md`; verify the tag and commit before relying on it.
 2. Cite source paths and line numbers in docs.
 3. Implement with structured errors and bounded responses.
-4. Add tests for config, path validation, permission gates, HTTP errors, response limits, and tool registration.
+4. Add tests for config, path validation, permission gates, HTTP errors, response limits, tool
+   registration, and the MCP-to-HTTP execution path.
 5. Run `python -m pytest`, `python -m compileall src`, and `ruff check`.
 
 For `/ws`, never claim exact build identity. Jenkins core returns a dynamic job-level workspace with
