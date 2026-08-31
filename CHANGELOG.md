@@ -2,7 +2,7 @@
 
 All notable changes are documented here.
 
-## 0.2.0 - Unreleased
+## 1.0.0 - 2026-08-31
 
 - Add progressive build-log chunks and bounded literal log search.
 - Enforce response limits while streaming and return structured transport failures.
@@ -21,6 +21,8 @@ All notable changes are documented here.
 - Add MIT licensing, security policy, and package metadata.
 - Prevent HTTP content coding from wrapping file downloads and invalidating byte accounting.
 - Prevent bounded JSON responses such as `whoAmI` from being decompressed twice.
+- Add real STDIO MCP protocol tests covering every registered tool against a deterministic local
+  Jenkins fixture.
 
 ## 0.1.0 - 2026-05-06
 
