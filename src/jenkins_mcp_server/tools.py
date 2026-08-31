@@ -20,6 +20,7 @@ from .workspace_bundle import (
     start_workspace_bundle_download,
     start_workspace_path_download,
 )
+from .workspace_tree import get_workspace_tree
 
 
 def _ok(data: Any) -> dict[str, Any]:
@@ -301,6 +302,27 @@ def register_tools(mcp: MCPServer) -> None:
         return _run(lambda: _get_json("pluginManager", params={"tree": tree}))
 
     @mcp.tool()
+    def jenkins_get_workspace_tree(
+        job: str | list[str],
+        workspace_path: str = "",
+        max_depth: int = 4,
+        max_entries: int = 1_000,
+    ) -> dict[str, Any]:
+        """List a bounded live workspace tree. Paths are not bound to a build number."""
+
+        def op() -> dict[str, Any]:
+            with _client() as client:
+                return get_workspace_tree(
+                    client,
+                    job,
+                    workspace_path,
+                    max_depth,
+                    max_entries,
+                )
+
+        return _run(op)
+
+    @mcp.tool()
     def jenkins_trigger_build(job: str | list[str], delay: str | None = None) -> dict[str, Any]:
         """Trigger a non-parameterized job build. Requires JENKINS_MCP_ENABLE_WRITES=1."""
 
@@ -511,6 +533,7 @@ READ_ONLY_TOOLS = [
     "jenkins_list_nodes",
     "jenkins_get_node",
     "jenkins_list_plugins",
+    "jenkins_get_workspace_tree",
 ]
 
 WRITE_TOOLS = [

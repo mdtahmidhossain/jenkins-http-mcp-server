@@ -53,6 +53,7 @@ EXPECTED_TOOLS = frozenset(
         "jenkins_list_nodes",
         "jenkins_get_node",
         "jenkins_list_plugins",
+        "jenkins_get_workspace_tree",
         "jenkins_trigger_build",
         "jenkins_trigger_build_with_parameters",
         "jenkins_stop_build",
@@ -409,6 +410,14 @@ class FakeJenkinsHandler(BaseHTTPRequestHandler):
         elif path == f"{JOB_PATH}/123/artifact/reports/report.txt":
             if self._require_identity(request):
                 self._send_bytes(ARTIFACT_FILE)
+        elif path == f"{JOB_PATH}/ws/*plain*":
+            self._send_text("README.txt\nreports/\nunavailable/\n")
+        elif path == f"{JOB_PATH}/ws/reports/*plain*":
+            self._send_text("result.txt\nnested/\n")
+        elif path == f"{JOB_PATH}/ws/reports/nested/*plain*":
+            self._send_text("deep.txt\n")
+        elif path == f"{JOB_PATH}/ws/unavailable/*plain*":
+            self._send_bytes(b"<html>No workspace</html>", content_type="text/html")
         elif path == f"{JOB_PATH}/ws/README.txt":
             if self._require_identity(request):
                 self._send_bytes(WORKSPACE_FILE)
@@ -672,6 +681,37 @@ async def _exercise_all_tools(state: FakeJenkinsState, tmp_path: Path) -> None:
         )
         returned.append(await _call_success(session, called, "jenkins_list_plugins"))
 
+        workspace_tree = await _call_success(
+            session,
+            called,
+            "jenkins_get_workspace_tree",
+            {
+                "job": ["folder", "demo"],
+                "workspace_path": "reports",
+                "max_depth": 2,
+                "max_entries": 20,
+            },
+        )
+        assert workspace_tree["entries"] == [
+            {"path": "reports/nested", "type": "directory", "depth": 1},
+            {"path": "reports/result.txt", "type": "file", "depth": 1},
+            {"path": "reports/nested/deep.txt", "type": "file", "depth": 2},
+        ]
+        assert workspace_tree["listing_requests"] == 3
+        assert workspace_tree["truncated"] is False
+        assert workspace_tree["workspace_freshness"] == "best_effort"
+        returned.append(workspace_tree)
+
+        unavailable_tree = await _call_tool(
+            session,
+            called,
+            "jenkins_get_workspace_tree",
+            {"job": ["folder", "demo"], "workspace_path": "unavailable"},
+        )
+        assert unavailable_tree["ok"] is False
+        assert unavailable_tree["error"]["code"] == "workspace_listing_unavailable"
+        returned.append(unavailable_tree)
+
         returned.append(
             await _call_success(
                 session,
@@ -920,7 +960,10 @@ def test_real_stdio_mcp_calls_every_tool_and_resource(tmp_path: Path) -> None:
     downloads = [
         request
         for request in requests
-        if "/ws/" in request.path or "/artifact/" in request.path
+        if (
+            ("/ws/" in request.path and not request.path.endswith("/*plain*"))
+            or "/artifact/" in request.path
+        )
     ]
     workspace_console_downloads = [
         request

@@ -39,6 +39,7 @@ Date checked: 2026-08-30
 - `core/src/main/java/hudson/console/AnnotatedLargeText.java`
 - `core/src/main/java/hudson/model/AbstractProject.java`
 - `core/src/main/java/hudson/model/DirectoryBrowserSupport.java`
+- `test/src/test/java/hudson/model/DirectoryBrowserSupportTest.java`
 - `core/src/main/java/hudson/model/ItemGroupMixIn.java`
 - `bom/pom.xml`
 - Stapler `2107.v8dfcb_e8ed317` source JAR: `org/kohsuke/stapler/framework/io/LargeText.java`
@@ -79,6 +80,10 @@ Date checked: 2026-08-30
 - Queue guard state: queue item ID/task and blocked/buildable/stuck fields are exported at
   `Queue.java:2260-2334`; URL/why are exported at `Queue.java:2443-2463`.
 - Workspace/directory zip: `DirectoryBrowserSupport` recognizes `*zip*` at `DirectoryBrowserSupport.java:205-226` and writes zip archives at `DirectoryBrowserSupport.java:262-275`.
+- Workspace tree listing: `DirectoryBrowserSupport` recognizes `*plain*` at
+  `DirectoryBrowserSupport.java:205-230` and writes one immediate child per UTF-8 line, with `/`
+  after directories, at `DirectoryBrowserSupport.java:277-289`. The core test calls
+  `job/{name}/ws/*plain*` at `DirectoryBrowserSupportTest.java:1226-1243`.
 - Artifacts: `Run.getArtifacts()` is `@Exported` at `Run.java:1075-1080`; `Run.doArtifact()` serves artifacts at `Run.java:2183-2191`.
 - Queue API: `Queue.getApi()` is at `Queue.java:1955-1957`; `Queue.getItems()` is exported at `Queue.java:787-810`.
 - Nodes/computers API: `Jenkins.getComputer()` binds `/computer/` at `Jenkins.java:1478-1485`; `ComputerSet.getApi()` is at `ComputerSet.java:470-472`; `Computer.getApi()` is at `Computer.java:1423-1425`.

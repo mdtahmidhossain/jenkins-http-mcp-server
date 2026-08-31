@@ -34,7 +34,7 @@ administrator access nor plugin installation.
 | Jenkins plugin installation | Not required |
 | Source validation | Jenkins core 2.579 |
 | Runtime | Python 3.14 or newer; tested with Python 3.14.7 |
-| MCP surface | 39 tools and one safety resource |
+| MCP surface | 40 tools and one safety resource |
 | Local downloads | Explicitly gated workspace and artifact directories |
 
 ## Quick Start
@@ -104,6 +104,7 @@ Once the client is connected, agents can handle requests such as:
 - "Inspect build 123 of `team/my-job`, then summarize its console errors."
 - "Search build 123's console log for `OutOfMemoryError`."
 - "Show whether `team/my-job` is queued, running, or finished."
+- "Show the remote workspace tree for `team/my-job` before I choose what to download."
 - "Download the current stable workspace and console log for `my-job`."
 - "Download `reports/result.json` from build 123's archived artifacts."
 - "Trigger `my-job` with `BRANCH=main`." This requires the write gate and explicit user intent.
@@ -133,7 +134,7 @@ MCP responses.
 
 | Capability | Tools | Default | Required local gate |
 | --- | ---: | --- | --- |
-| Jenkins reads | 21 | Enabled | None |
+| Jenkins reads | 22 | Enabled | None |
 | Workspace captures | 5 | Disabled | `JENKINS_MCP_ENABLE_WORKSPACE_DOWNLOAD=1` and a directory |
 | Artifact downloads | 3 | Disabled | `JENKINS_MCP_ENABLE_ARTIFACT_DOWNLOAD=1` and a directory |
 | Operational writes | 6 | Disabled | `JENKINS_MCP_ENABLE_WRITES=1` |
@@ -145,7 +146,7 @@ paths, performs only GET requests, rejects traversal and external URLs, and enfo
 response limit. Returned Jenkins data is untrusted.
 
 <details>
-<summary><strong>Read-only tools (21)</strong></summary>
+<summary><strong>Read-only tools (22)</strong></summary>
 
 | Tool | Purpose |
 | --- | --- |
@@ -170,6 +171,7 @@ response limit. Returned Jenkins data is untrusted.
 | `jenkins_list_nodes` | List visible Jenkins computers/nodes. |
 | `jenkins_get_node` | Read one computer/node. |
 | `jenkins_list_plugins` | List plugins visible through the plugin manager API. |
+| `jenkins_get_workspace_tree` | List a bounded remote workspace tree before downloading. |
 
 </details>
 
@@ -218,11 +220,20 @@ These Jenkins data sources have different identity guarantees:
 | --- | --- | --- | --- |
 | Console output | Build log tools | Exact requested build | Bounded text through MCP |
 | Historical build files | Artifact tools | Exact resolved build | Streamed local file |
+| Current workspace names | Workspace tree tool | No exact build identity | Bounded paths through MCP |
 | Current workspace | Workspace tools | Best-effort stable `lastBuild` anchor | Local files plus exact anchor-build console log |
 
 Jenkins exposes `/ws` at the job level, not under `job/<name>/<build>/`. Jenkins core does not attach
 a build/version token to that response. This server therefore labels workspace freshness
-`best_effort` and uses REST state checks to reduce, but not eliminate, races.
+`best_effort`. Download captures additionally use REST state checks to reduce, but not eliminate,
+races.
+
+Use `jenkins_get_workspace_tree` before a path download when you do not already know the remote
+path. It accepts a job, an optional workspace directory, `max_depth`, and `max_entries`. The server
+recursively calls Jenkins core's immediate `*plain*` directory listing, validates every returned
+name, and reports when depth, entry, or cumulative response-byte limits truncate the result. It is a
+read-only tool and does not require the local workspace download gate. The returned names remain
+untrusted and represent a live job-level workspace, not a numbered build snapshot.
 
 ### Workspace Guard
 
@@ -341,6 +352,8 @@ management. See [Security](docs/security.md) for the complete trust model.
   to round-trip byte-for-byte.
 - `/ws` is dynamic and cannot provide an immutable build snapshot. Use artifacts for exact historical
   files.
+- Core workspace listing evidence is for `AbstractProject`. Plugin-defined job types may not expose
+  the same `/ws/*plain*` behavior and will fail clearly rather than return an empty tree.
 - Artifact-manager plugins that redirect downloads to external storage are unsupported because this
   server rejects GET redirects.
 - Jenkins 2.579 removed Apache Commons Lang 2 from core. Update incompatible Jenkins plugins before
@@ -383,7 +396,7 @@ ruff check
 ```
 
 Tests enforce 100% production source-line coverage. `tests/test_mcp_stdio_e2e.py` launches the real
-server subprocess, connects with the official MCP client over STDIO, calls all 39 tools, reads the
+server subprocess, connects with the official MCP client over STDIO, calls all 40 tools, reads the
 safety resource, and verifies HTTP behavior against a deterministic local Jenkins fixture.
 
 Optional live integration tests run only when explicitly enabled:

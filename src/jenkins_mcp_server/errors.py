@@ -50,6 +50,10 @@ class JenkinsProtocolError(JenkinsMCPError):
     code = "jenkins_protocol_error"
 
 
+class WorkspaceListingError(JenkinsMCPError):
+    code = "workspace_listing_unavailable"
+
+
 @dataclass
 class JenkinsTransportError(JenkinsMCPError):
     kind: str

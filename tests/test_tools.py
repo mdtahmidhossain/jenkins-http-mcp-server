@@ -35,10 +35,15 @@ def test_tool_schema_has_parameters() -> None:
     workspace_tool = mcp._tool_manager._tools[  # noqa: SLF001
         "jenkins_start_workspace_bundle_download"
     ]
+    workspace_tree_tool = mcp._tool_manager._tools["jenkins_get_workspace_tree"]  # noqa: SLF001
 
     assert "path" in tool.parameters["properties"]
     assert tool.parameters["required"] == ["path"]
     assert workspace_tool.parameters["properties"]["force_refresh"]["default"] is False
+    assert workspace_tree_tool.parameters["required"] == ["job"]
+    assert workspace_tree_tool.parameters["properties"]["workspace_path"]["default"] == ""
+    assert workspace_tree_tool.parameters["properties"]["max_depth"]["default"] == 4
+    assert workspace_tree_tool.parameters["properties"]["max_entries"]["default"] == 1_000
 
 
 def _tool_fn(server, name: str):
@@ -65,7 +70,11 @@ def test_tool_helpers_build_paths_queries_and_client(monkeypatch: pytest.MonkeyP
 def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeReadClient:
         def __init__(self) -> None:
-            self.config = SimpleNamespace(max_log_bytes=64, max_log_scan_bytes=1_000)
+            self.config = SimpleNamespace(
+                max_log_bytes=64,
+                max_log_scan_bytes=1_000,
+                max_response_bytes=1_000,
+            )
             self.calls: list[tuple[str, str, Any]] = []
 
         def __enter__(self):
@@ -117,8 +126,15 @@ def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.Monke
             path: str,
             *,
             params: dict[str, Any] | None = None,
+            max_bytes: int | None = None,
         ) -> httpx.Response:
-            self.calls.append((method, path, params))
+            self.calls.append((method, path, params if max_bytes is None else max_bytes))
+            if path.endswith("/*plain*"):
+                return httpx.Response(
+                    200,
+                    content=b"README.md\n",
+                    headers={"Content-Type": "text/plain;charset=UTF-8"},
+                )
             return httpx.Response(
                 200,
                 json={"mode": "NORMAL"},
@@ -171,6 +187,15 @@ def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.Monke
     assert _tool_fn(server, "jenkins_list_nodes")("computer[displayName]")["ok"]
     assert _tool_fn(server, "jenkins_get_node")("")["ok"]
     assert _tool_fn(server, "jenkins_list_plugins")("plugins[shortName]")["ok"]
+    workspace_tree = _tool_fn(server, "jenkins_get_workspace_tree")(
+        "folder/demo",
+        "",
+        1,
+        10,
+    )
+    assert workspace_tree["data"]["entries"] == [
+        {"path": "README.md", "type": "file", "depth": 1}
+    ]
 
     paths = [call[1] for call in client.calls]
     assert "queue/api/json?depth=1" in paths
@@ -179,6 +204,7 @@ def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.Monke
     assert "job/folder/job/demo/12/logText/progressiveText" in paths
     assert "computer/%28built-in%29" in paths
     assert "pluginManager" in paths
+    assert "job/folder/job/demo/ws/*plain*" in paths
 
 
 def test_tool_errors_are_returned_as_structured_payloads(

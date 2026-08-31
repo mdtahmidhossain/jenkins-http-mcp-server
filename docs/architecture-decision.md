@@ -28,6 +28,19 @@ HTTP transport was not added because STDIO is the requested first target for Cod
   `JENKINS_MCP_ARTIFACT_DOWNLOAD_DIR`.
 - Admin-like operations are not implemented: script console, restart, safe restart, quiet down, plugin install/update, credential read/write, node creation/deletion, global config changes, and user management.
 
+## Remote Workspace Listing
+
+`jenkins_get_workspace_tree` uses Jenkins core's authenticated, read-only
+`job/{name}/ws/{directory}/*plain*` Stapler endpoint. Each response contains only the immediate
+children, so the Python server performs a breadth-first walk. It verifies requested subdirectories
+through their parent listings and validates every returned name before placing it in another URL.
+
+The walk is bounded by caller-selected depth and entry limits plus the existing
+`JENKINS_MCP_MAX_RESPONSE_BYTES` cumulative response budget. It returns paths through MCP and writes
+nothing to disk, so it does not require the workspace download gate. The result remains untrusted
+and `best_effort`: `/ws` is dynamic, exposes no build token, and core evidence covers
+`AbstractProject` rather than every plugin-defined job type.
+
 ## Long-Running Downloads
 
 Workspace downloads run asynchronously in detached Python worker processes. A SQLite registry at
