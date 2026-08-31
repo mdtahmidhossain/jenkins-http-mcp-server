@@ -19,6 +19,7 @@ All notable changes are documented here.
   documentation against current official sources.
 - Depend on the MCP SDK without its unused CLI extra.
 - Add MIT licensing, security policy, and package metadata.
+- Prevent HTTP content coding from wrapping file downloads and invalidating byte accounting.
 
 ## 0.1.0 - 2026-05-06
 

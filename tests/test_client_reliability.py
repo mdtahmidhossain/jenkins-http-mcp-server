@@ -536,3 +536,44 @@ def test_stream_to_file_cleans_up_disk_write_errors(
             client.stream_to_file("job/demo/1/artifact/x", destination, max_bytes=10)
 
     assert not destination.exists()
+
+
+def test_stream_to_file_requests_identity_encoding(tmp_path: Path) -> None:
+    payload = b"zip-bytes"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Accept-Encoding"] == "identity"
+        return httpx.Response(
+            200,
+            headers={"Content-Length": str(len(payload))},
+            content=payload,
+        )
+
+    destination = tmp_path / "workspace.zip.partial"
+    with JenkinsClient(_config(), transport=httpx.MockTransport(handler)) as client:
+        result = client.stream_to_file("job/demo/ws/*zip*/workspace.zip", destination, max_bytes=20)
+
+    assert destination.read_bytes() == payload
+    assert result["bytes_downloaded"] == len(payload)
+    assert result["total_bytes"] == len(payload)
+
+
+def test_stream_to_file_rejects_http_content_encoding(tmp_path: Path) -> None:
+    destination = tmp_path / "workspace.zip.partial"
+    stream = _Chunks([b"not-consumed"])
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip"},
+            stream=stream,
+        )
+    )
+
+    with (
+        JenkinsClient(_config(), transport=transport) as client,
+        pytest.raises(JenkinsProtocolError, match="requesting identity"),
+    ):
+        client.stream_to_file("job/demo/ws/*zip*/workspace.zip", destination, max_bytes=20)
+
+    assert not destination.exists()
+    assert stream.read_count == 0

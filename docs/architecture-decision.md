@@ -77,6 +77,8 @@ Ordinary JSON/XML responses are consumed incrementally and rejected as soon as t
 byte limit is exceeded. Transient GET transport failures and HTTP 429/502/503/504 responses are
 retried with bounded backoff. POST requests are never generically retried. Transport exceptions are
 converted to safe structured MCP errors without including credentials or full external URLs.
+File downloads explicitly send `Accept-Encoding: identity` and reject HTTP content-coded responses
+so transport compression cannot invalidate byte accounting for archives, artifacts, or logs.
 
 ## Source of Truth
 

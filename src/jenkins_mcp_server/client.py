@@ -572,6 +572,11 @@ class JenkinsClient:
         destination.parent.mkdir(parents=True, exist_ok=True)
 
         def consume(response: httpx.Response) -> dict[str, Any]:
+            content_encoding = response.headers.get("Content-Encoding")
+            if content_encoding and content_encoding.strip().lower() != "identity":
+                raise JenkinsProtocolError(
+                    "Jenkins file response used HTTP content encoding despite requesting identity"
+                )
             raw_total = response.headers.get("Content-Length")
             total = int(raw_total) if raw_total and raw_total.isdigit() else None
             if total is not None and total > max_bytes:
@@ -612,7 +617,12 @@ class JenkinsClient:
             }
 
         try:
-            return self._stream_get(path, params=None, headers=None, consume=consume)
+            return self._stream_get(
+                path,
+                params=None,
+                headers={"Accept-Encoding": "identity"},
+                consume=consume,
+            )
         except Exception:
             destination.unlink(missing_ok=True)
             raise
