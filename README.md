@@ -126,9 +126,11 @@ Jenkins HTTP MCP Server
           +-- bounded streaming --> explicitly configured local download directories
 ```
 
-Normal reads return concise structured data through MCP. Workspace archives and artifact files, plus
-console logs saved as part of workspace captures, stream to local disk so they are not encoded into
-MCP responses.
+Successful calls return `{"ok": true, "data": ...}` as structured MCP content. Expected synchronous
+Jenkins, validation, and permission failures set MCP `isError` and keep their bounded code and
+details in the error text. Background download failures remain structured operation status data with
+`status="failed"`. Workspace archives and artifact files, plus console logs saved as part of
+workspace captures, stream to local disk so they are not encoded into MCP responses.
 
 ## Tools
 
@@ -320,8 +322,8 @@ must be absolute paths.
 ## Safety Model
 
 - Read-only tools are the only tools enabled by default.
-- Local gates never bypass Jenkins permissions. Jenkins `401`, `403`, and `404` responses remain
-  structured failures.
+- Local gates never bypass Jenkins permissions. Synchronous Jenkins `401`, `403`, and `404`
+  responses become MCP tool errors; background downloads record failures in operation status data.
 - Write tools require explicit local flags and explicit user intent. POST requests are never
   generically retried; only a Jenkins crumb-related `403` can cause one crumb refresh and retry.
 - There is no generic POST tool.
@@ -359,8 +361,8 @@ management. See [Security](docs/security.md) for the complete trust model.
 - Jenkins 2.579 removed Apache Commons Lang 2 from core. Update incompatible Jenkins plugins before
   upgrading a controller.
 
-Unsupported endpoints and permission failures return errors; they are not treated as empty or
-successful responses.
+Synchronous unsupported endpoints and permission failures set MCP `isError`; background operation
+failures appear in structured status data. Neither is treated as empty or successful work.
 
 ## Agent Skills
 

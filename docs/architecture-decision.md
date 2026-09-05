@@ -88,8 +88,9 @@ Artifact cancellation writes only its marker and never rewrites progress from a 
 
 Ordinary JSON/XML responses are consumed incrementally and rejected as soon as their configured
 byte limit is exceeded. Transient GET transport failures and HTTP 429/502/503/504 responses are
-retried with bounded backoff. POST requests are never generically retried. Transport exceptions are
-converted to safe structured MCP errors without including credentials or full external URLs.
+retried with bounded backoff. POST requests are never generically retried. Synchronous transport
+exceptions become MCP tool errors; background workers persist them in failed operation status data.
+Both paths use bounded JSON details that exclude credentials and full external URLs.
 After HTTPX decodes a bounded response body, the detached in-memory response drops stale
 content-coding and framing metadata so JSON endpoints such as `whoAmI` are not decoded a second time.
 File downloads explicitly send `Accept-Encoding: identity` and reject HTTP content-coded responses

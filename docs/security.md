@@ -23,7 +23,9 @@ instructions.
 
 ## Permissions
 
-The server assumes a non-admin Jenkins user. Jenkins remains the authority for permissions. A 401, 403, or 404 is returned clearly as a structured error rather than being hidden.
+The server assumes a non-admin Jenkins user. Jenkins remains the authority for permissions. A
+synchronous 401, 403, or 404 is reported as an MCP tool error with bounded JSON details. Background
+download failures are recorded in structured operation status data rather than being hidden.
 
 ## Gates
 
@@ -107,11 +109,13 @@ fragments, wildcards, and Jenkins directory-browser magic segments.
 
 ## Network Failures
 
-Normal Jenkins responses are bounded while streaming rather than after full buffering. Timeouts,
-TLS failures, connection failures, and other transport failures return structured errors containing
-only the method and normalized relative Jenkins path. Transient GET failures use at most three
-attempts with short backoff. POST requests are not automatically retried; the only POST replay is the
-existing one-time crumb refresh after Jenkins explicitly returns a crumb-related 403.
+Normal Jenkins responses are bounded while streaming rather than after full buffering. Synchronous
+timeouts, TLS failures, connection failures, and other transport failures become MCP tool errors.
+Background download workers persist the same failures with `status="failed"`. Their JSON details
+identify the method and normalized relative Jenkins path without credentials or full URLs. Transient
+GET failures use at most three attempts with short backoff. POST requests are not automatically
+retried; the only POST replay is the existing one-time crumb refresh after Jenkins explicitly
+returns a crumb-related 403.
 
 HTTPX-decoded bounded responses are rebuilt without stale `Content-Encoding`, `Content-Length`, or
 `Transfer-Encoding` metadata. This prevents JSON endpoints such as `whoAmI` from trying to decode an

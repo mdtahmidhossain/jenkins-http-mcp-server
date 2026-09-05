@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from mcp.server import MCPServer
 
+from . import __version__
 from .resources import register_resources
 from .tools import register_tools
 
@@ -13,6 +14,7 @@ def build_server() -> MCPServer:
             "External Jenkins MCP server using normal Jenkins HTTP APIs. "
             "Read-only by default; write tools are gated by environment flags."
         ),
+        version=__version__,
     )
     register_tools(mcp)
     register_resources(mcp)

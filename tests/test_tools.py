@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 import jenkins_mcp_server.tools as tool_module
 from jenkins_mcp_server.__main__ import build_server
@@ -20,13 +22,85 @@ from jenkins_mcp_server.tools import (
 
 def test_tool_schemas_registered() -> None:
     mcp = build_server()
-    registered = set(mcp._tool_manager._tools.keys())  # noqa: SLF001
+    tools = mcp._tool_manager._tools  # noqa: SLF001
+    registered = set(tools)
+    categorized = (
+        set(READ_ONLY_TOOLS)
+        | set(WRITE_TOOLS)
+        | set(OPTIONAL_JOB_CONFIG_TOOLS)
+        | set(WORKSPACE_BUNDLE_TOOLS)
+        | set(ARTIFACT_DOWNLOAD_TOOLS)
+    )
 
-    assert set(READ_ONLY_TOOLS).issubset(registered)
-    assert set(WRITE_TOOLS).issubset(registered)
-    assert set(OPTIONAL_JOB_CONFIG_TOOLS).issubset(registered)
-    assert set(WORKSPACE_BUNDLE_TOOLS).issubset(registered)
-    assert set(ARTIFACT_DOWNLOAD_TOOLS).issubset(registered)
+    assert registered == categorized
+    for tool in tools.values():
+        assert tool.output_schema is not None
+        assert set(tool.output_schema["properties"]) == {"ok", "data"}
+        assert set(tool.output_schema["required"]) == {"ok", "data"}
+        assert tool.output_schema["properties"]["ok"]["const"] is True
+        assert tool.annotations is not None
+
+    remote_additive = {
+        "jenkins_start_artifact_download",
+        "jenkins_create_job",
+        "jenkins_copy_job",
+    }
+    remote_destructive = {
+        "jenkins_trigger_build",
+        "jenkins_trigger_build_with_parameters",
+        "jenkins_stop_build",
+        "jenkins_cancel_queue_item",
+        "jenkins_disable_job",
+        "jenkins_enable_job",
+        "jenkins_update_job_config",
+        "jenkins_delete_job",
+        "jenkins_start_workspace_bundle_download",
+        "jenkins_start_workspace_path_download",
+    }
+    local_destructive = {
+        "jenkins_get_artifact_download_status",
+        "jenkins_cancel_artifact_download",
+        "jenkins_get_workspace_bundle_status",
+        "jenkins_cancel_workspace_bundle_download",
+        "jenkins_cleanup_workspace_bundle_operations",
+    }
+    assert (
+        set(READ_ONLY_TOOLS) | remote_additive | remote_destructive | local_destructive
+    ) == registered
+
+    annotation_profiles = (
+        (set(READ_ONLY_TOOLS), {"readOnlyHint": True, "openWorldHint": True}),
+        (
+            remote_additive,
+            {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "openWorldHint": True,
+            },
+        ),
+        (
+            remote_destructive,
+            {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "idempotentHint": False,
+                "openWorldHint": True,
+            },
+        ),
+        (
+            local_destructive,
+            {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "idempotentHint": False,
+                "openWorldHint": False,
+            },
+        ),
+    )
+    for names, expected in annotation_profiles:
+        for name in names:
+            assert tools[name].annotations.model_dump(by_alias=True, exclude_none=True) == expected
 
 
 def test_tool_schema_has_parameters() -> None:
@@ -207,7 +281,7 @@ def test_read_only_tools_execute_expected_client_calls(monkeypatch: pytest.Monke
     assert "job/folder/job/demo/ws/*plain*" in paths
 
 
-def test_tool_errors_are_returned_as_structured_payloads(
+def test_tool_errors_raise_native_mcp_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("JENKINS_URL", "https://jenkins.example.com/")
@@ -216,10 +290,16 @@ def test_tool_errors_are_returned_as_structured_payloads(
     monkeypatch.setenv("JENKINS_MCP_ENABLE_WRITES", "0")
     server = build_server()
 
-    invalid_path = _tool_fn(server, "jenkins_get_json")("https://evil.example/api/json")
-    blocked_write = _tool_fn(server, "jenkins_trigger_build")("demo")
+    with pytest.raises(ToolError) as invalid_path_error:
+        _tool_fn(server, "jenkins_get_json")("https://evil.example/api/json")
+    with pytest.raises(ToolError) as blocked_write_error:
+        _tool_fn(server, "jenkins_trigger_build")("demo")
 
+    invalid_path = json.loads(str(invalid_path_error.value))
+    blocked_write = json.loads(str(blocked_write_error.value))
+    assert invalid_path["ok"] is False
     assert invalid_path["error"]["code"] == "invalid_jenkins_path"
+    assert blocked_write["ok"] is False
     assert blocked_write["error"]["code"] == "permission_gate"
 
 
@@ -260,8 +340,10 @@ def test_version_and_health_reject_invalid_jenkins_responses(
             return response
 
     monkeypatch.setattr(tool_module, "_client", lambda: FakeClient())
-    result = _tool_fn(build_server(), tool_name)()
+    with pytest.raises(ToolError) as raised:
+        _tool_fn(build_server(), tool_name)()
 
+    result = json.loads(str(raised.value))
     assert result["error"]["code"] == "jenkins_protocol_error"
     assert message in result["error"]["message"]
 
@@ -449,10 +531,12 @@ def test_log_search_tool_rejects_scan_above_configured_limit(
             return None
 
     monkeypatch.setattr(tool_module, "_client", lambda: FakeClient())
-    result = _tool_fn(build_server(), "jenkins_search_build_log")(
-        "demo",
-        1,
-        "ERROR",
-        101,
-    )
+    with pytest.raises(ToolError) as raised:
+        _tool_fn(build_server(), "jenkins_search_build_log")(
+            "demo",
+            1,
+            "ERROR",
+            101,
+        )
+    result = json.loads(str(raised.value))
     assert result["error"]["code"] == "invalid_tool_input"

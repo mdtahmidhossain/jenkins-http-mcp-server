@@ -18,6 +18,9 @@ from urllib.parse import parse_qs, urlsplit
 import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.types import CallToolResult
+
+from jenkins_mcp_server import __version__
 
 TEST_USER = "mcp-test-user"
 TEST_TOKEN = "mcp-test-token"
@@ -517,21 +520,21 @@ async def mcp_session(environment: dict[str, str]) -> AsyncIterator[ClientSessio
         stdio_client(parameters) as (read_stream, write_stream),
         ClientSession(read_stream, write_stream) as session,
     ):
-        await session.initialize()
+        initialized = await session.initialize()
+        assert initialized.server_info.name == "jenkins-mcp-server"
+        assert initialized.server_info.version == __version__
         yield session
 
 
-async def _call_tool(
+async def _call_result(
     session: ClientSession,
     called: set[str],
     name: str,
     arguments: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> CallToolResult:
     result = await session.call_tool(name, arguments or {})
-    assert not result.is_error, (name, result)
-    assert isinstance(result.structured_content, dict), (name, result)
     called.add(name)
-    return result.structured_content
+    return result
 
 
 async def _call_success(
@@ -540,9 +543,31 @@ async def _call_success(
     name: str,
     arguments: dict[str, Any] | None = None,
 ) -> Any:
-    payload = await _call_tool(session, called, name, arguments)
+    result = await _call_result(session, called, name, arguments)
+    assert not result.is_error, (name, result)
+    assert isinstance(result.structured_content, dict), (name, result)
+    payload = result.structured_content
     assert payload.get("ok") is True, (name, payload)
     return payload["data"]
+
+
+async def _call_error(
+    session: ClientSession,
+    called: set[str],
+    name: str,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = await _call_result(session, called, name, arguments)
+    assert result.is_error, (name, result)
+    assert result.structured_content is None, (name, result)
+    assert len(result.content) == 1, (name, result)
+    content = result.content[0]
+    assert content.type == "text", (name, result)
+    prefix = f"Error executing tool {name}: "
+    assert content.text.startswith(prefix), (name, result)
+    payload = json.loads(content.text.removeprefix(prefix))
+    assert payload.get("ok") is False, (name, payload)
+    return payload
 
 
 async def _wait_for_operation(
@@ -571,6 +596,11 @@ async def _exercise_all_tools(state: FakeJenkinsState, tmp_path: Path) -> None:
         listed = await session.list_tools()
         assert {tool.name for tool in listed.tools} == EXPECTED_TOOLS
         assert all(tool.input_schema.get("type") == "object" for tool in listed.tools)
+        for tool in listed.tools:
+            assert tool.output_schema is not None
+            assert set(tool.output_schema["properties"]) == {"ok", "data"}
+            assert set(tool.output_schema["required"]) == {"ok", "data"}
+            assert tool.annotations is not None
 
         safety = await session.read_resource("jenkins-mcp://safety")
         assert len(safety.contents) == 1
@@ -702,7 +732,7 @@ async def _exercise_all_tools(state: FakeJenkinsState, tmp_path: Path) -> None:
         assert workspace_tree["workspace_freshness"] == "best_effort"
         returned.append(workspace_tree)
 
-        unavailable_tree = await _call_tool(
+        unavailable_tree = await _call_error(
             session,
             called,
             "jenkins_get_workspace_tree",
@@ -892,7 +922,7 @@ async def _exercise_all_tools(state: FakeJenkinsState, tmp_path: Path) -> None:
             ("forbidden", 403, "jenkins_forbidden"),
             ("missing", 404, "jenkins_not_found"),
         ):
-            error = await _call_tool(session, called, "jenkins_get_json", {"path": path})
+            error = await _call_error(session, called, "jenkins_get_json", {"path": path})
             assert error["ok"] is False
             assert error["error"]["status_code"] == status_code
             assert error["error"]["code"] == code
@@ -980,12 +1010,10 @@ async def _exercise_default_gates_and_bad_auth(state: FakeJenkinsState, tmp_path
     called: set[str] = set()
     async with mcp_session(_server_env(state, tmp_path, enabled=False)) as session:
         for name, arguments in GATED_TOOL_CALLS.items():
-            payload = await _call_tool(session, called, name, arguments)
-            assert payload["ok"] is False
+            payload = await _call_error(session, called, name, arguments)
             assert payload["error"]["code"] == "permission_gate"
 
-        unauthorized = await _call_tool(session, called, "jenkins_whoami")
-        assert unauthorized["ok"] is False
+        unauthorized = await _call_error(session, called, "jenkins_whoami")
         assert unauthorized["error"]["code"] == "jenkins_unauthorized"
         assert unauthorized["error"]["status_code"] == 401
         assert "incorrect-test-token" not in json.dumps(unauthorized)

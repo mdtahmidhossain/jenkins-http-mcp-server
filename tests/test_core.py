@@ -9,6 +9,8 @@ import httpx
 import pytest
 from mcp.server import MCPServer
 
+from jenkins_mcp_server import __version__
+from jenkins_mcp_server.__main__ import build_server
 from jenkins_mcp_server.crumbs import CrumbManager
 from jenkins_mcp_server.errors import (
     JenkinsHTTPError,
@@ -19,6 +21,14 @@ from jenkins_mcp_server.errors import (
 )
 from jenkins_mcp_server.logging import get_logger, safe_headers_for_log
 from jenkins_mcp_server.resources import register_resources
+
+
+def test_server_metadata_is_populated() -> None:
+    server = build_server()
+
+    assert server.name == "jenkins-mcp-server"
+    assert server.version == __version__
+    assert server.instructions
 
 
 def test_module_entrypoint_runs_stdio(monkeypatch: pytest.MonkeyPatch) -> None:

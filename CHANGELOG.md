@@ -2,6 +2,11 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+- Report expected synchronous Jenkins failures with MCP `isError`, and advertise explicit success
+  schemas, behavioral annotations, and the server version.
+
 ## 1.0.0 - 2026-08-31
 
 - Add progressive build-log chunks and bounded literal log search.

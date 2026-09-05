@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal, TypedDict
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 from .artifact_download import (
     cancel_artifact_download,
@@ -23,15 +26,46 @@ from .workspace_bundle import (
 from .workspace_tree import get_workspace_tree
 
 
-def _ok(data: Any) -> dict[str, Any]:
+class ToolSuccess(TypedDict):
+    """Structured content returned by successful Jenkins tools."""
+
+    ok: Literal[True]
+    data: Any
+
+
+_REMOTE_READ_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=True,
+    open_world_hint=True,
+)
+_REMOTE_ADDITIVE_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
+)
+_REMOTE_DESTRUCTIVE_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=True,
+)
+_LOCAL_DESTRUCTIVE_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
+
+
+def _ok(data: Any) -> ToolSuccess:
     return {"ok": True, "data": data}
 
 
-def _run(fn):
+def _run(fn: Callable[[], Any]) -> ToolSuccess:
     try:
         return _ok(fn())
     except JenkinsMCPError as exc:
-        return exc.to_dict()
+        raise ToolError(json.dumps(exc.to_dict(), separators=(",", ":"), sort_keys=True)) from exc
 
 
 def _client() -> JenkinsClient:
@@ -74,13 +108,13 @@ def _version_header(response) -> str:
 
 
 def register_tools(mcp: MCPServer) -> None:
-    @mcp.tool()
-    def jenkins_whoami() -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_whoami() -> ToolSuccess:
         """Return the authenticated Jenkins identity from /whoAmI/api/json."""
         return _run(lambda: _get_json("whoAmI"))
 
-    @mcp.tool()
-    def jenkins_version() -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_version() -> ToolSuccess:
         """Return Jenkins version from the X-Jenkins response header."""
 
         def op() -> dict[str, Any]:
@@ -93,8 +127,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_health() -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_health() -> ToolSuccess:
         """Return a small health snapshot from top-level Jenkins JSON and version headers."""
 
         def op() -> dict[str, Any]:
@@ -121,8 +155,11 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_get_json(path: str, query: dict[str, str | int] | None = None) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_get_json(
+        path: str,
+        query: dict[str, str | int] | None = None,
+    ) -> ToolSuccess:
         """GET a relative Jenkins JSON API path. Rejects external URLs and traversal."""
 
         def op() -> Any:
@@ -131,43 +168,43 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
     def jenkins_list_jobs(
         tree: str = "jobs[name,fullName,url,color,_class]",
         depth: int | None = None,
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """List jobs visible to the Jenkins user."""
         return _run(lambda: _get_json("api/json", params=_query(tree, depth)))
 
-    @mcp.tool()
-    def jenkins_get_job(job: str | list[str], tree: str | None = None) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_get_job(job: str | list[str], tree: str | None = None) -> ToolSuccess:
         """Get one job by Jenkins job path. Nested paths use slash-separated names or a list."""
         return _run(lambda: _get_json(job_path(job), params=_query(tree)))
 
-    @mcp.tool()
-    def jenkins_get_job_config(job: str | list[str]) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_get_job_config(job: str | list[str]) -> ToolSuccess:
         """Read serialized job config.xml; secrets may be redacted without Configure permission."""
         return _run(lambda: _get_text(f"{job_path(job)}/config.xml"))
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
     def jenkins_list_builds(
         job: str | list[str],
         tree: str = "builds[number,url,result,building,timestamp,duration]",
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """List recent builds for a job."""
         return _run(lambda: _get_json(job_path(job), params={"tree": tree}))
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
     def jenkins_get_build(
         job: str | list[str],
         build: int | str,
         tree: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """Get a build by number or Jenkins permalink such as lastBuild."""
         return _run(lambda: _get_json(_build_path(job, build), params=_query(tree)))
 
-    @mcp.tool()
-    def jenkins_get_build_log(job: str | list[str], build: int | str) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_get_build_log(job: str | list[str], build: int | str) -> ToolSuccess:
         """Get consoleText for a build, truncated by JENKINS_MCP_MAX_LOG_BYTES."""
 
         def op() -> dict[str, Any]:
@@ -179,12 +216,12 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
     def jenkins_get_build_log_chunk(
         job: str | list[str],
         build: int | str,
         start: int = 0,
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """Read one progressive log response and return Jenkins' next safe cursor."""
 
         def op() -> dict[str, Any]:
@@ -197,14 +234,14 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
     def jenkins_search_build_log(
         job: str | list[str],
         build: int | str,
         pattern: str,
         max_scan_bytes: int | None = None,
         max_matches: int = 20,
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """Stream and search bounded consoleText for an exact, case-sensitive literal."""
 
         def op() -> dict[str, Any]:
@@ -227,87 +264,87 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_get_build_artifacts(job: str | list[str], build: int | str) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_get_build_artifacts(job: str | list[str], build: int | str) -> ToolSuccess:
         """List artifacts exported on a build JSON API response."""
         tree = "artifacts[displayPath,fileName,relativePath]"
         return _run(lambda: _get_json(_build_path(job, build), params={"tree": tree}))
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_ADDITIVE_ANNOTATIONS)
     def jenkins_start_artifact_download(
         job: str | list[str],
         artifact_path: str,
         build: int | str = "lastBuild",
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """Start a gated async download of one archived build artifact to local disk."""
         return _run(lambda: start_artifact_download(job, artifact_path, build))
 
-    @mcp.tool()
-    def jenkins_get_artifact_download_status(operation_id: str) -> dict[str, Any]:
+    @mcp.tool(annotations=_LOCAL_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_get_artifact_download_status(operation_id: str) -> ToolSuccess:
         """Get artifact download bytes, speed, paths, and final status."""
         return _run(lambda: read_artifact_download_status(operation_id))
 
-    @mcp.tool()
-    def jenkins_cancel_artifact_download(operation_id: str) -> dict[str, Any]:
+    @mcp.tool(annotations=_LOCAL_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_cancel_artifact_download(operation_id: str) -> ToolSuccess:
         """Request cancellation of a running artifact download."""
         return _run(lambda: cancel_artifact_download(operation_id))
 
-    @mcp.tool()
-    def jenkins_get_test_report(job: str | list[str], build: int | str) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_get_test_report(job: str | list[str], build: int | str) -> ToolSuccess:
         """Get /testReport/api/json when a test-report plugin such as JUnit provides it."""
         return _run(lambda: _get_json(f"{_build_path(job, build)}/testReport"))
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
     def jenkins_list_queue(
         tree: str = "items[id,url,why,blocked,buildable,stuck]",
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """List visible Jenkins queue items."""
         return _run(lambda: _get_json("queue", params={"tree": tree}))
 
-    @mcp.tool()
-    def jenkins_get_queue_item(item_id: int) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_get_queue_item(item_id: int) -> ToolSuccess:
         """Get one Jenkins queue item by ID."""
         return _run(lambda: _get_json(f"queue/item/{item_id}"))
 
-    @mcp.tool()
-    def jenkins_list_views(tree: str = "views[name,url,_class]") -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_list_views(tree: str = "views[name,url,_class]") -> ToolSuccess:
         """List Jenkins views visible to the user."""
         return _run(lambda: _get_json("api/json", params={"tree": tree}))
 
-    @mcp.tool()
-    def jenkins_get_view(view: str, tree: str | None = None) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_get_view(view: str, tree: str | None = None) -> ToolSuccess:
         """Get one Jenkins view by name."""
         return _run(lambda: _get_json(f"view/{safe_segment(view, 'view')}", params=_query(tree)))
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
     def jenkins_list_nodes(
         tree: str = (
             "computer[displayName,offline,temporarilyOffline,numExecutors,assignedLabels[name]]"
         ),
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """List Jenkins computers/nodes visible to the user."""
         return _run(lambda: _get_json("computer", params={"tree": tree}))
 
-    @mcp.tool()
-    def jenkins_get_node(node: str) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
+    def jenkins_get_node(node: str) -> ToolSuccess:
         """Get one Jenkins computer/node by name. Use (built-in) for the built-in node."""
         value = "(built-in)" if node == "" else node
         return _run(lambda: _get_json(f"computer/{safe_segment(value, 'node')}"))
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
     def jenkins_list_plugins(
         tree: str = "plugins[shortName,longName,version,active,enabled,pinned,hasUpdate,deleted]",
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """List installed Jenkins plugins visible through pluginManager/api/json."""
         return _run(lambda: _get_json("pluginManager", params={"tree": tree}))
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_READ_ANNOTATIONS)
     def jenkins_get_workspace_tree(
         job: str | list[str],
         workspace_path: str = "",
         max_depth: int = 4,
         max_entries: int = 1_000,
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """List a bounded live workspace tree. Paths are not bound to a build number."""
 
         def op() -> dict[str, Any]:
@@ -322,8 +359,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_trigger_build(job: str | list[str], delay: str | None = None) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_trigger_build(job: str | list[str], delay: str | None = None) -> ToolSuccess:
         """Trigger a non-parameterized job build. Requires JENKINS_MCP_ENABLE_WRITES=1."""
 
         def op() -> dict[str, Any]:
@@ -335,12 +372,12 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
     def jenkins_trigger_build_with_parameters(
         job: str | list[str],
         parameters: dict[str, str | int | float | bool],
         delay: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """Trigger a parameterized job build. Requires JENKINS_MCP_ENABLE_WRITES=1."""
 
         def op() -> dict[str, Any]:
@@ -354,8 +391,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_stop_build(job: str | list[str], build: int | str) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_stop_build(job: str | list[str], build: int | str) -> ToolSuccess:
         """Stop a running build. Requires JENKINS_MCP_ENABLE_WRITES=1."""
 
         def op() -> dict[str, Any]:
@@ -366,8 +403,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_cancel_queue_item(item_id: int) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_cancel_queue_item(item_id: int) -> ToolSuccess:
         """Cancel a Jenkins queue item. Requires JENKINS_MCP_ENABLE_WRITES=1."""
 
         def op() -> dict[str, Any]:
@@ -378,8 +415,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_disable_job(job: str | list[str]) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_disable_job(job: str | list[str]) -> ToolSuccess:
         """Disable a job. Requires JENKINS_MCP_ENABLE_WRITES=1."""
 
         def op() -> dict[str, Any]:
@@ -390,8 +427,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_enable_job(job: str | list[str]) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_enable_job(job: str | list[str]) -> ToolSuccess:
         """Enable a job. Requires JENKINS_MCP_ENABLE_WRITES=1."""
 
         def op() -> dict[str, Any]:
@@ -402,8 +439,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_create_job(name: str, config_xml: str) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_ADDITIVE_ANNOTATIONS)
+    def jenkins_create_job(name: str, config_xml: str) -> ToolSuccess:
         """Create a top-level job from config.xml. Requires write and job-config flags."""
 
         def op() -> dict[str, Any]:
@@ -419,8 +456,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_copy_job(from_job: str, new_name: str) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_ADDITIVE_ANNOTATIONS)
+    def jenkins_copy_job(from_job: str, new_name: str) -> ToolSuccess:
         """Copy a top-level job. Requires write and job-config flags."""
 
         def op() -> dict[str, Any]:
@@ -434,8 +471,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_update_job_config(job: str | list[str], config_xml: str) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_update_job_config(job: str | list[str], config_xml: str) -> ToolSuccess:
         """Replace job config.xml; Jenkins reserializes it. Requires job-config write gates."""
 
         def op() -> dict[str, Any]:
@@ -450,8 +487,8 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
-    def jenkins_delete_job(job: str | list[str]) -> dict[str, Any]:
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_delete_job(job: str | list[str]) -> ToolSuccess:
         """Delete a job. Requires write, job-config, and delete flags."""
 
         def op() -> dict[str, Any]:
@@ -462,23 +499,23 @@ def register_tools(mcp: MCPServer) -> None:
 
         return _run(op)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
     def jenkins_start_workspace_bundle_download(
         job: str | list[str],
         build: int | str = "lastBuild",
         force_refresh: bool = False,
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """Start or join a guarded workspace capture plus exact build console log."""
         return _run(lambda: start_workspace_bundle_download(job, build, force_refresh))
 
-    @mcp.tool()
+    @mcp.tool(annotations=_REMOTE_DESTRUCTIVE_ANNOTATIONS)
     def jenkins_start_workspace_path_download(
         job: str | list[str],
         workspace_path: str,
         kind: str,
         build: int | str = "lastBuild",
         force_refresh: bool = False,
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """Start or join a guarded workspace file/folder capture plus exact console log."""
         return _run(
             lambda: start_workspace_path_download(
@@ -490,21 +527,21 @@ def register_tools(mcp: MCPServer) -> None:
             )
         )
 
-    @mcp.tool()
-    def jenkins_get_workspace_bundle_status(operation_id: str) -> dict[str, Any]:
+    @mcp.tool(annotations=_LOCAL_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_get_workspace_bundle_status(operation_id: str) -> ToolSuccess:
         """Get download/extract/log progress, bytes, speed, paths, and final status."""
         return _run(lambda: read_workspace_bundle_status(operation_id))
 
-    @mcp.tool()
-    def jenkins_cancel_workspace_bundle_download(operation_id: str) -> dict[str, Any]:
+    @mcp.tool(annotations=_LOCAL_DESTRUCTIVE_ANNOTATIONS)
+    def jenkins_cancel_workspace_bundle_download(operation_id: str) -> ToolSuccess:
         """Request cancellation of a running workspace bundle operation."""
         return _run(lambda: cancel_workspace_bundle(operation_id))
 
-    @mcp.tool()
+    @mcp.tool(annotations=_LOCAL_DESTRUCTIVE_ANNOTATIONS)
     def jenkins_cleanup_workspace_bundle_operations(
         older_than_days: int = 30,
         max_operations: int = 100,
-    ) -> dict[str, Any]:
+    ) -> ToolSuccess:
         """Delete bounded, terminal local workspace operations older than the requested age."""
         return _run(
             lambda: cleanup_workspace_bundle_operations(older_than_days, max_operations)
