@@ -44,7 +44,7 @@ administrator access nor plugin installation.
 Clone the current release and install it into a Python 3.14 environment:
 
 ```bash
-git clone --branch v1.0.0 --depth 1 \
+git clone --branch v2.0.0 --depth 1 \
   https://github.com/mdtahmidhossain/jenkins-http-mcp-server.git
 cd jenkins-http-mcp-server
 

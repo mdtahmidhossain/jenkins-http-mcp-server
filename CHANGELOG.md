@@ -2,10 +2,18 @@
 
 All notable changes are documented here.
 
-## Unreleased
+## 2.0.0 - 2026-09-05
 
-- Report expected synchronous Jenkins failures with MCP `isError`, and advertise explicit success
-  schemas, behavioral annotations, and the server version.
+- Breaking: expected synchronous Jenkins, validation, and permission failures now set MCP
+  `isError=true` instead of returning `{"ok": false, "error": ...}` in `structuredContent`.
+  Clients must check `isError` and read error details from text content. The SDK prefixes the JSON
+  error payload with an execution-error message, so the entire text is not a standalone JSON object.
+  Successful calls keep `{"ok": true, "data": ...}`; background download failures remain operation
+  status data with `status="failed"`.
+- Advertise explicit success-envelope schemas, behavioral annotations, and the server version.
+- Add bounded live workspace-tree browsing with `jenkins_get_workspace_tree`. Workspace freshness
+  remains `best_effort`; paths are not bound to a build number.
+- Expand real STDIO tests for tool errors, schemas, annotations, and initialization metadata.
 
 ## 1.0.0 - 2026-08-31
 
